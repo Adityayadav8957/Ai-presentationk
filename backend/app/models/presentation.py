@@ -14,5 +14,6 @@ class Presentation(SQLModel, table=True):
     llm_provider: str | None = None
     llm_model: str | None = None
     image_provider: str | None = None
+    qa_enabled: bool = Field(default=False)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

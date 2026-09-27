@@ -96,6 +96,7 @@ function PresentationApp() {
   const [llmProvider, setLlmProvider] = useState("");
   const [llmModel, setLlmModel] = useState("");
   const [imageProvider, setImageProvider] = useState("");
+  const [qaEnabled, setQaEnabled] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -125,6 +126,8 @@ function PresentationApp() {
         setCancelled(true);
         setIsBusy(false);
       } else if (job?.status === "failed") {
+        // Slides were already fetched above — a failed job (e.g. a stalled
+        // QA step) doesn't mean the content itself is gone.
         setError(job.error ?? "Generation failed for an unknown reason.");
         setIsBusy(false);
       } else {
@@ -135,7 +138,10 @@ function PresentationApp() {
             await Promise.all([refreshPresentation(id), refreshMessages(id)]);
             setIsBusy(false);
           },
-          (message) => {
+          async (message) => {
+            // Content generated before the failure is still worth showing —
+            // only the error banner used to hide it, now it doesn't.
+            await Promise.all([refreshPresentation(id), refreshMessages(id)]);
             setError(message);
             setIsBusy(false);
           },
@@ -214,6 +220,7 @@ function PresentationApp() {
         llm_provider: llmProvider || undefined,
         llm_model: llmModel || undefined,
         image_provider: imageProvider || undefined,
+        qa_enabled: qaEnabled,
       });
       setPresentationId(presentation_id);
       router.replace(`/?id=${presentation_id}`);
@@ -223,7 +230,8 @@ function PresentationApp() {
           await refreshPresentation(presentation_id);
           setIsBusy(false);
         },
-        (message) => {
+        async (message) => {
+          await refreshPresentation(presentation_id);
           setError(message);
           setIsBusy(false);
         },
@@ -242,7 +250,8 @@ function PresentationApp() {
         await Promise.all([refreshPresentation(presentationId), refreshMessages(presentationId)]);
         setIsBusy(false);
       },
-      (message) => {
+      async (message) => {
+        await Promise.all([refreshPresentation(presentationId), refreshMessages(presentationId)]);
         setError(message);
         setIsBusy(false);
       },
@@ -295,19 +304,27 @@ function PresentationApp() {
       </aside>
 
       <main className="flex items-center justify-center overflow-auto p-8">
-        {error ? (
+        {active ? (
+          <div className="w-full max-w-4xl">
+            {error && (
+              <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                <span className="font-medium">Note: </span>
+                {error}
+              </div>
+            )}
+            <div className="shadow-lg">
+              <SlideRenderer content={active.content} theme={theme} />
+            </div>
+          </div>
+        ) : error ? (
           <div className="max-w-md rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">
             <p className="font-medium">Generation failed</p>
             <p className="mt-1 text-xs">{error}</p>
           </div>
-        ) : cancelled && !active ? (
+        ) : cancelled ? (
           <div className="max-w-md rounded-md border border-neutral-200 bg-neutral-100 p-4 text-sm text-neutral-600">
             <p className="font-medium">Generation cancelled</p>
             <p className="mt-1 text-xs">You stopped this before it finished.</p>
-          </div>
-        ) : active ? (
-          <div className="w-full max-w-4xl shadow-lg">
-            <SlideRenderer content={active.content} theme={theme} />
           </div>
         ) : isBusy ? (
           <div className="flex flex-col items-center gap-6">
@@ -398,6 +415,25 @@ function PresentationApp() {
               </option>
             ))}
           </select>
+
+          <label className="flex items-start gap-2 rounded-md border border-neutral-200 bg-white p-2.5 text-xs">
+            <input
+              type="checkbox"
+              checked={qaEnabled}
+              onChange={(e) => setQaEnabled(e.target.checked)}
+              disabled={!!presentationId}
+              className="mt-0.5"
+            />
+            <span>
+              <span className="font-medium text-neutral-700">Run visual QA</span>
+              <span className="block text-neutral-400">
+                Screenshots each slide and asks a vision model to check for overflow,
+                overlap, or tiny text. More thorough, but adds one extra model call per
+                slide — noticeably slower, especially with a local model.
+              </span>
+            </span>
+          </label>
+
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}

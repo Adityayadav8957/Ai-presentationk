@@ -30,3 +30,6 @@ backend/media/*
 # Editors
 .vscode/
 .idea/
+
+# Local Claude Code tooling config, not part of the app
+.claude/

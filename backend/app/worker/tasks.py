@@ -44,12 +44,25 @@ def _fail_job(session: Session, job: Job | None, presentation: Presentation, exc
     session.commit()
 
 
-def _run_qa(session: Session, presentation_id: str, slides: list[Slide], llm_provider_name: str | None) -> None:
+def _run_qa(
+    session: Session,
+    presentation_id: str,
+    slides: list[Slide],
+    llm_provider_name: str | None,
+    job: Job | None,
+) -> None:
     qa_agent = QAAgent(get_vision_provider(llm_provider_name))
     for slide in slides:
         slide.qa_report = qa_agent.review(presentation_id, slide.id)
         session.add(slide)
-    session.commit()
+        # Vision QA is slow (one screenshot + one vision-model call per
+        # slide) — bump updated_at after each slide, not just once for the
+        # whole step, so a legitimately slow multi-slide QA pass doesn't
+        # get mistaken for a dead worker by the staleness check.
+        if job:
+            job.updated_at = datetime.now(UTC)
+            session.add(job)
+        session.commit()
 
 
 @celery_app.task(bind=True, name="generate_presentation")
@@ -95,8 +108,11 @@ def generate_presentation(self, presentation_id: str) -> str:
             for slide in slides:
                 session.refresh(slide)
 
-            on_progress("qa")
-            _run_qa(session, presentation.id, slides, presentation.llm_provider)
+            if presentation.qa_enabled:
+                on_progress("qa")
+                _run_qa(session, presentation.id, slides, presentation.llm_provider, job)
+            else:
+                logger.info("generate_presentation: QA disabled for presentation=%s, skipping", presentation_id)
 
             if job:
                 job.status = "done"
@@ -169,8 +185,11 @@ def refine_presentation(self, presentation_id: str, instruction: str) -> str:
             for slide in new_slides:
                 session.refresh(slide)
 
-            on_progress("qa")
-            _run_qa(session, presentation.id, new_slides, presentation.llm_provider)
+            if presentation.qa_enabled:
+                on_progress("qa")
+                _run_qa(session, presentation.id, new_slides, presentation.llm_provider, job)
+            else:
+                logger.info("refine_presentation: QA disabled for presentation=%s, skipping", presentation_id)
 
             session.add(
                 Message(presentation_id=presentation_id, role="assistant", content="Updated the presentation.")

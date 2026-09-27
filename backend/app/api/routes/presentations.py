@@ -29,6 +29,7 @@ def create_presentation(payload: dict, session: Session = Depends(get_session)):
     llm_provider = payload.pop("llm_provider", None)
     llm_model = payload.pop("llm_model", None)
     image_provider = payload.pop("image_provider", None)
+    qa_enabled = bool(payload.pop("qa_enabled", False))
 
     presentation = Presentation(
         title=payload.get("topic", "Untitled"),
@@ -36,6 +37,7 @@ def create_presentation(payload: dict, session: Session = Depends(get_session)):
         llm_provider=llm_provider,
         llm_model=llm_model,
         image_provider=image_provider,
+        qa_enabled=qa_enabled,
     )
     session.add(presentation)
     session.commit()

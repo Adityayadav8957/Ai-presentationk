@@ -142,7 +142,8 @@ ai_presentation/
 │   │   │   ├── design_agent.py   # deterministic theme selection
 │   │   │   ├── image_agent.py    # generates + saves slide images
 │   │   │   ├── html_agent.py     # per-slide HTML generation, run in parallel
-│   │   │   ├── qa_agent.py       # screenshot + vision critique
+│   │   │   ├── design_reference.py # design principles/avoid-list + technique examples
+│   │   │   ├── qa_agent.py       # screenshot + vision critique (opt-in, off by default)
 │   │   │   ├── revision_agent.py # chat-based whole-deck edits
 │   │   │   └── json_utils.py     # robust JSON extraction from model output
 │   │   ├── worker/
@@ -248,6 +249,29 @@ npm run dev                                # http://localhost:3000
   `GET /presentations/{id}/status` now self-heals this: if a non-terminal
   job hasn't updated in `STALE_JOB_TIMEOUT` (3 minutes), it's marked
   `failed` with an explanatory error on the next poll.
+- **QA is genuinely slow, and a single "qa" step can legitimately take
+  longer than the staleness timeout** (one screenshot + one vision-model
+  call per slide, sequentially). This looked identical to a dead worker
+  and falsely marked healthy jobs as failed. Fixed by bumping the job's
+  timestamp after each slide's QA completes, not just once for the whole
+  step — but QA is also slow enough that it's now **off by default**, with
+  a UI toggle ("Run visual QA") explaining the tradeoff.
+- **A failed job doesn't mean the content is gone.** The frontend used to
+  hide the slide canvas entirely behind a red error box whenever the job
+  ended in `failed` — even if generation had actually completed and only a
+  later, unrelated step (like QA) failed. It now always shows whatever
+  slides exist, with the error as a small non-blocking note instead.
+- **Local small models (e.g. `llama3.2:3b`) partially copy the HTMLAgent's
+  style-reference example instead of adapting it** — confirmed directly by
+  inspecting output (verbatim placeholder sentences leaking into unrelated
+  slides, and outright bugs like `color` matching `background`, or a
+  `rotate(45deg)` on a stat number). This is a model capability ceiling,
+  not a prompt bug: instruction-following at this scale is unreliable for
+  "use this as inspiration, don't copy it." Two hard rules were added
+  regardless (never match text color to its background; never rotate
+  text), but the HTML quality of this feature scales with model
+  capability — SiliconFlow's larger models or OpenAI/Anthropic will
+  follow the design guidance far more faithfully than a local 3B model.
 
 ### Debugging
 
@@ -270,8 +294,9 @@ stack (Postgres, Redis, Celery worker, Flower, FastAPI, Next.js):
   iframe, with the generic component layout as a fallback if it fails
 - Image generation wired to real slide `image` elements, served via
   `/media`
-- Visual QA: real Playwright screenshot → vision-model critique, stored per
-  slide, gracefully skipped (not fatal) on any failure
+- Visual QA (opt-in, off by default — it's slow): real Playwright
+  screenshot → vision-model critique, stored per slide, gracefully skipped
+  (not fatal) on any failure
 - Chat-based whole-deck revision
 - Provider/model picker in the UI, backed by live model listing where the
   provider supports it
