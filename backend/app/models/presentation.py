@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlmodel import JSON, Column, Field, SQLModel
@@ -12,6 +12,7 @@ class Presentation(SQLModel, table=True):
     story: dict = Field(default_factory=dict, sa_column=Column(JSON))
     status: str = Field(default="draft")
     llm_provider: str | None = None
+    llm_model: str | None = None
     image_provider: str | None = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

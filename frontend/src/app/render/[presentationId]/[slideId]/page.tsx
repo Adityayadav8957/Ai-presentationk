@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 
 import { SlideRenderer } from "@/components/slides/SlideRenderer";
 import { getPresentation } from "@/lib/api";
-import type { SlideContent } from "@/lib/slide-schema";
+import type { SlideContent, Theme } from "@/lib/slide-schema";
 
 type Slide = { id: string; content: SlideContent };
 
@@ -17,5 +17,7 @@ export default async function RenderSlidePage({
 
   if (!slide) notFound();
 
-  return <SlideRenderer content={slide.content} />;
+  const theme = data.presentation?.theme as Theme | undefined;
+
+  return <SlideRenderer content={slide.content} theme={theme} />;
 }

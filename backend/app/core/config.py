@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434/v1"
 
     frontend_render_url: str = "http://localhost:3000"
+    public_backend_url: str = "http://localhost:8000"
 
 
 @lru_cache

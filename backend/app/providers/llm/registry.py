@@ -6,7 +6,14 @@ from app.providers.llm.openai_compatible import OpenAICompatibleProvider
 _DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
     "siliconflow": "Qwen/Qwen2.5-72B-Instruct",
-    "ollama": "llama3.1",
+    "ollama": "llama3.2:3b",
+    "anthropic": "claude-sonnet-5",
+}
+
+_VISION_MODELS = {
+    "openai": "gpt-4o-mini",
+    "siliconflow": "Qwen/Qwen2-VL-72B-Instruct",
+    "ollama": "llava:7b",
     "anthropic": "claude-sonnet-5",
 }
 
@@ -38,3 +45,9 @@ def get_llm_provider(name: str | None = None, model: str | None = None) -> LLMPr
         return AnthropicProvider(api_key=settings.anthropic_api_key or "", model=resolved_model)
 
     raise ValueError(f"Unknown LLM provider: {provider_name}")
+
+
+def get_vision_provider(name: str | None = None) -> LLMProvider:
+    settings = get_settings()
+    provider_name = name or settings.default_llm_provider
+    return get_llm_provider(provider_name, model=_VISION_MODELS.get(provider_name))

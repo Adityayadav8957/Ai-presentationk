@@ -18,3 +18,11 @@ export type SlideContent = {
   title?: string;
   elements: SlideElement[];
 };
+
+export type Theme = {
+  name: string;
+  primary: string;
+  accent: string;
+  background: string;
+  font: string;
+};

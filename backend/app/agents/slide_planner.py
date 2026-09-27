@@ -1,19 +1,51 @@
+from app.agents.json_utils import extract_json
 from app.providers.llm.base import LLMProvider
+
+SLIDE_SCHEMA_HINT = """
+Return ONLY a JSON array, one object per slide, in this exact schema:
+{
+  "type": "hero" | "data_story" | "comparison" | "timeline" | "process" | "split" | "grid",
+  "title": "string",
+  "elements": [
+    {"type": "heading", "text": "..."},
+    {"type": "text", "text": "..."},
+    {"type": "stat", "value": "73%", "label": "..."},
+    {"type": "insight", "text": "..."},
+    {"type": "chart", "chartType": "line" | "bar" | "donut", "data": [{"label": "...", "value": 0}]},
+    {"type": "image", "prompt": "description for an image generator"}
+  ]
+}
+Never include exact pixel positions or sizes — only semantic content.
+No prose, no markdown fences, no commentary before or after — JSON array only.
+"""
 
 
 class SlidePlannerAgent:
-    """Turns story beats into semantic slide JSON — never pixel coordinates.
-    The frontend layout engine owns geometry."""
-
     def __init__(self, llm: LLMProvider):
         self.llm = llm
 
-    def run(self, story: dict) -> list[dict]:
+    def run(self, brief: dict, story_text: str, slide_count: int) -> list[dict]:
         prompt = (
-            "Convert this story into a list of slides. For each slide, output a semantic "
-            "JSON object with a 'type' (e.g. hero, data_story, comparison, timeline, process) "
-            "and an 'elements' list describing what content it needs — never exact positions "
-            f"or pixel sizes.\nStory: {story.get('raw', '')}"
+            f"Presentation brief: {brief}\n\n"
+            f"Narrative outline:\n{story_text}\n\n"
+            f"Produce exactly {slide_count} slides covering this outline, choosing the best "
+            f"slide type and elements for each idea.\n{SLIDE_SCHEMA_HINT}"
         )
-        self.llm.chat([{"role": "user", "content": prompt}])
-        return []
+        response = self.llm.chat([{"role": "user", "content": prompt}], temperature=0.4)
+
+        try:
+            slides = extract_json(response)
+            if isinstance(slides, list) and slides:
+                return slides
+        except ValueError:
+            pass
+
+        return self._fallback(story_text, slide_count)
+
+    def _fallback(self, story_text: str, slide_count: int) -> list[dict]:
+        lines = [line.strip("-• ") for line in story_text.splitlines() if line.strip()]
+        lines = lines[:slide_count] or ["Untitled"]
+        return [
+            {"type": "hero", "title": line, "elements": [{"type": "text", "text": line}]}
+            for line in lines
+        ]

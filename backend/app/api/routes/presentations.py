@@ -11,8 +11,18 @@ router = APIRouter(prefix="/presentations", tags=["presentations"])
 
 
 @router.post("")
-def create_presentation(brief: dict, session: Session = Depends(get_session)):
-    presentation = Presentation(title=brief.get("topic", "Untitled"), brief=brief)
+def create_presentation(payload: dict, session: Session = Depends(get_session)):
+    llm_provider = payload.pop("llm_provider", None)
+    llm_model = payload.pop("llm_model", None)
+    image_provider = payload.pop("image_provider", None)
+
+    presentation = Presentation(
+        title=payload.get("topic", "Untitled"),
+        brief=payload,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        image_provider=image_provider,
+    )
     session.add(presentation)
     session.commit()
     session.refresh(presentation)

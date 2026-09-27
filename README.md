@@ -3,8 +3,8 @@
 Prompt-driven presentation generator. The user describes what they want, an
 agent pipeline researches and plans the content, a layout engine turns
 semantic content into slide geometry, and a visual QA loop screenshots the
-result and fixes issues automatically. There is no manual slide editor —
-every change happens through the chat panel.
+result and critiques it. There is no manual slide editor — every change
+happens through the chat panel.
 
 ## Architecture
 
@@ -13,10 +13,11 @@ every change happens through the chat panel.
                           │
                           ▼
                  ┌─────────────────┐
-                 │  FRONTEND       │  Next.js — chat UI, slide canvas,
-                 │  (Next.js)      │  layout engine, render route
+                 │  FRONTEND       │  Next.js — chat UI, provider/model
+                 │  (Next.js)      │  picker, slide canvas, layout engine,
+                 │                 │  render route
                  └────────┬────────┘
-                          │ REST (create / status / chat)
+                          │ REST (create / status / chat / providers)
                           ▼
                  ┌─────────────────┐
                  │  BACKEND API    │  FastAPI — presentations, jobs,
@@ -36,11 +37,14 @@ every change happens through the chat panel.
         ┌─────────────────┼──────────────────┐
         ▼                 ▼                  ▼
    RESEARCH AGENT    STORY AGENT       SLIDE PLANNER AGENT
-        │                 │                  │
+        │                 │           (structured JSON, with a
+        │                 │            plain-text fallback if the
+        │                 │            model's JSON doesn't parse)
         └─────────────────┼──────────────────┘
                           ▼
-                  DESIGN AGENT (theme)
-                          │
+                  DESIGN AGENT (deterministic theme pick)
+                          ▼
+                  IMAGE AGENT (generates + saves slide images)
                           ▼
                  semantic slide JSON  ──────────►  saved to Postgres
                           │
@@ -53,13 +57,14 @@ every change happens through the chat panel.
                     screenshot
                           │
                           ▼
-                  QA AGENT (vision model)
+          QA AGENT (vision-capable model critiques it;
+           failures/missing models are skipped, never fatal)
                           │
-                 issues found? ──yes──► patch semantic JSON ──► re-render
-                          │
-                          no
                           ▼
                     mark job done
+
+  Chat follow-ups ("make this more premium") go through a separate
+  RevisionAgent → regenerates the deck JSON → re-runs image + QA agents.
 ```
 
 **Key architectural decision:** the AI never outputs pixel coordinates. It
@@ -81,18 +86,28 @@ backend/app/providers/llm/
   base.py                 → LLMProvider interface (chat / stream)
   openai_compatible.py     → OpenAI, SiliconFlow, Ollama, DeepSeek, Together...
   anthropic_provider.py    → Claude
-  registry.py              → get_llm_provider(name) picks the active one
+  registry.py              → get_llm_provider(name, model) picks the active one
+  catalog.py               → GET /providers model listing (live models.list()
+                             where available, curated fallback otherwise)
+  ollama_utils.py          → list pulled models / pull a model on demand
 
 backend/app/providers/image/
   base.py
-  siliconflow.py           → free-tier FLUX/SD image generation
+  siliconflow.py           → FLUX/SD image generation
   pollinations.py          → free, keyless fallback
   registry.py
 ```
 
-Which provider is active is controlled by `DEFAULT_LLM_PROVIDER` /
-`DEFAULT_IMAGE_PROVIDER` in `backend/.env`, or per-presentation via the
-`llm_provider` / `image_provider` columns on the `Presentation` row.
+The frontend has a **provider + model picker** in the chat panel (like any
+chat app) — LLM provider, model, and image provider, sourced live from
+`GET /providers`. Selections are locked once a presentation exists (a
+presentation's provider doesn't change mid-conversation).
+
+**Ollama models are selectable even before they're pulled.** The picker
+shows a small curated list of common models; ones not yet present locally
+are marked "(downloads on first use)". Selecting one and generating
+triggers `ensure_model_pulled()` in the Celery task before the pipeline
+runs, reported as a `pulling_model` progress step.
 
 ## Repository structure
 
@@ -101,36 +116,40 @@ ai_presentation/
 ├── docker-compose.yml          # postgres, redis, backend, celery worker, flower
 ├── backend/
 │   ├── app/
-│   │   ├── main.py             # FastAPI app, router registration
+│   │   ├── main.py             # FastAPI app, router registration, /media static mount
 │   │   ├── core/config.py      # env-driven settings (pydantic-settings)
 │   │   ├── db/session.py       # SQLModel engine + session
 │   │   ├── models/              # Presentation, Slide, Job, Message
 │   │   ├── providers/
-│   │   │   ├── llm/            # provider-agnostic LLM clients
+│   │   │   ├── llm/            # provider-agnostic LLM clients + catalog + ollama utils
 │   │   │   └── image/          # provider-agnostic image clients
 │   │   ├── agents/
-│   │   │   ├── orchestrator.py # runs the pipeline, reports progress
+│   │   │   ├── orchestrator.py # runs the content pipeline, reports progress
 │   │   │   ├── research_agent.py
 │   │   │   ├── story_agent.py
-│   │   │   ├── slide_planner.py
-│   │   │   ├── design_agent.py
-│   │   │   └── qa_agent.py
+│   │   │   ├── slide_planner.py  # structured JSON output + fallback
+│   │   │   ├── design_agent.py   # deterministic theme selection
+│   │   │   ├── image_agent.py    # generates + saves slide images
+│   │   │   ├── qa_agent.py       # screenshot + vision critique
+│   │   │   ├── revision_agent.py # chat-based whole-deck edits
+│   │   │   └── json_utils.py     # robust JSON extraction from model output
 │   │   ├── worker/
 │   │   │   ├── celery_app.py   # Celery configured against Redis
-│   │   │   └── tasks.py        # generate_presentation task
+│   │   │   └── tasks.py        # generate_presentation / refine_presentation
 │   │   ├── rendering/
 │   │   │   └── qa_screenshot.py # Playwright screenshot of the frontend's render route
+│   │   ├── media/               # generated images (gitignored, served at /media)
 │   │   └── api/routes/         # presentations, chat, providers
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   └── .env.example
 └── frontend/
     ├── src/app/
-    │   ├── page.tsx            # 3-pane UI: slides / canvas / AI chat
+    │   ├── page.tsx            # 3-pane UI: slides / canvas / AI chat + provider picker
     │   └── render/[presentationId]/[slideId]/page.tsx  # bare slide render, used by Playwright for QA
     ├── src/components/slides/  # SlideRenderer + per-element components
     ├── src/lib/
-    │   ├── slide-schema.ts     # semantic JSON types
+    │   ├── slide-schema.ts     # semantic JSON types + Theme type
     │   ├── layout-engine.ts    # semantic JSON → arrangement (no pixels)
     │   └── api.ts              # backend client
     └── .env.local.example
@@ -138,25 +157,30 @@ ai_presentation/
 
 ## Generation flow
 
-1. User types a prompt in the chat panel → `POST /presentations`.
-2. Backend creates a `Presentation` row and enqueues `generate_presentation`
-   on Celery.
-3. The worker runs the `Orchestrator`, which calls each agent in turn
-   (research → story → slide planning → design) and reports its current
-   step back through `Job.step`, polled by the frontend.
-4. Semantic slide JSON is saved as `Slide` rows.
+1. User types a prompt (or clicks a preset) in the chat panel →
+   `POST /presentations` with the chosen provider/model.
+2. Backend creates a `Presentation` row, the URL updates to `/?id=<id>` (so
+   a refresh resumes the same presentation instead of dropping back to
+   blank), and `generate_presentation` is enqueued on Celery.
+3. The worker runs the `Orchestrator` (research → story → structured slide
+   JSON → theme → images), reporting each step through `Job.step`, polled
+   by the frontend.
+4. Slide JSON is saved as `Slide` rows.
 5. For each slide, Playwright screenshots the frontend's own render route
-   and a vision-capable model critiques it; problems get patched back into
-   the semantic JSON and re-rendered.
-6. Job is marked done; the frontend loads the finished slides.
+   and a vision-capable model critiques it; the result is stored in
+   `Slide.qa_report` (shown as a small indicator dot on the slide thumbnail).
+   A screenshot or vision-model failure is recorded and skipped, never fatal.
+6. Job is marked done (or `failed`, with the error surfaced in the UI —
+   job failures no longer hang forever).
 7. Further prompts ("make this more premium", "shorten slide 5") go through
-   `POST /presentations/{id}/chat` — this refinement path is stubbed for now
-   (see Roadmap).
+   `POST /presentations/{id}/chat` → `refine_presentation` → the
+   `RevisionAgent` regenerates the whole deck JSON with the instruction
+   applied, then re-runs image generation and QA.
 
 ## Local development
 
-**Requirements:** Docker, Node 20+, a SiliconFlow API key (free tier) or a
-local Ollama install.
+**Requirements:** Docker, Node 20+, and at least one working LLM provider:
+a SiliconFlow API key, an OpenAI/Anthropic key, or a local Ollama install.
 
 ```bash
 cp backend/.env.example backend/.env      # fill in provider keys
@@ -174,27 +198,60 @@ cd frontend
 npm run dev                                # http://localhost:3000
 ```
 
-## Current status (MVP scaffold)
+### Gotchas discovered running this for real
 
-What's wired end to end: API → Postgres → Redis/Celery job → progress
-polling → frontend rendering → Playwright render route.
+- **SiliconFlow has two separate platforms** — `api.siliconflow.cn` and
+  `api.siliconflow.com` — with **separate accounts and keys**. A key from
+  one will fail on the other with a misleading `401 Token is invalid`
+  instead of a clearer error. Use the domain matching where you created
+  the key.
+- **`image_size` must be one of SiliconFlow's exact enum values**
+  (`512x512`, `768x1024`, `1024x768`, `576x1024`, `1024x576`) —
+  `1024x1024` is not accepted.
+- **Docker networking:** `backend`/`worker` run in containers, but Ollama
+  and (in dev) the Next.js frontend run on your host. From inside a
+  container, `localhost` means the container itself — use
+  `host.docker.internal` for `OLLAMA_BASE_URL` and `FRONTEND_RENDER_URL`
+  (Playwright, which runs in the backend container, needs this to reach
+  the frontend dev server for QA screenshots). `PUBLIC_BACKEND_URL` stays
+  `localhost` on purpose — it's read by the browser on your host, not by
+  container code.
+- **Ollama install:** prefer `brew install --cask ollama` (prebuilt binary)
+  over `brew install ollama` (formula), which compiles `llama.cpp` from
+  source and is drastically slower.
 
-What's stubbed and needs real logic next:
-- Agents currently make a single LLM call each and don't yet parse
-  structured output into real `Slide` rows (`slide_planner.py` returns `[]`).
-- `design_agent.py` and `qa_agent.py` are pass-throughs — no theme
-  application or actual screenshot/critique loop yet.
+## Current status
+
+Fully working end to end, verified with real requests against a running
+stack (Postgres, Redis, Celery worker, Flower, FastAPI, Next.js):
+
+- Structured content generation (research → story → JSON slides → theme →
+  images), with a plain-text fallback if the model's JSON doesn't parse
+- Image generation wired to real slide `image` elements, served via
+  `/media`
+- Visual QA: real Playwright screenshot → vision-model critique, stored per
+  slide, gracefully skipped (not fatal) on any failure
+- Chat-based whole-deck revision
+- Provider/model picker in the UI, backed by live model listing where the
+  provider supports it
+- Job failure handling — failed jobs surface the real error instead of
+  hanging at "queued" forever
+- URL-based resume — refreshing `/?id=<presentation>` reloads that
+  presentation's state instead of starting over
+
+What's still simplified and worth revisiting:
 - The layout engine only does a two-column primary/secondary split — no
-  constraint rules (overlap avoidance, min font size, density limits) yet.
-- Chat-based refinement (`/chat` route) doesn't call the orchestrator yet.
-- No source/citation tracking on research claims yet.
+  constraint rules (overlap avoidance, min font size, density limits) yet
+- Research agent doesn't track real sources/citations yet
+- Chat revision replaces the whole deck rather than diffing individual
+  slides — reliable but wasteful for small edits
+- No chart/diagram rendering yet (chart elements render as placeholders)
 
 ## Roadmap
 
-- Structured-output slide generation (JSON-schema-constrained LLM calls)
 - Constraint-based layout engine (safe margins, min font size, overlap checks)
-- Real QA loop: screenshot → vision model → patch → re-render
 - Research agent with actual web search + source tracking
 - Diagram/chart agents (D3-based rendering)
 - Version history per presentation
-- Context-aware chat editing (element / slide / deck / narrative scope)
+- Context-aware, scoped chat editing (element / slide / deck / narrative)
+- Targeted slide-level revision instead of whole-deck regeneration

@@ -23,7 +23,9 @@ class SiliconFlowImageProvider(ImageProvider):
             json={
                 "model": self.model,
                 "prompt": prompt,
-                "image_size": kwargs.get("image_size", "1024x1024"),
+                # Valid enum per SiliconFlow's API: 512x512, 768x1024, 1024x768,
+                # 576x1024, 1024x576 — "1024x1024" is NOT accepted.
+                "image_size": kwargs.get("image_size", "1024x576"),
             },
             timeout=60,
         )

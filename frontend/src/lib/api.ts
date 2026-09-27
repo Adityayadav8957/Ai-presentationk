@@ -9,6 +9,7 @@ export type JobStatus = {
   id: string;
   status: string;
   step: string;
+  error?: string | null;
 };
 
 export async function createPresentation(brief: Record<string, unknown>) {
@@ -35,4 +36,53 @@ export async function getPresentation(presentationId: string) {
   });
   if (!response.ok) throw new Error("Failed to fetch presentation");
   return response.json();
+}
+
+export type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+};
+
+export async function sendChatMessage(presentationId: string, content: string) {
+  const response = await fetch(`${API_URL}/presentations/${presentationId}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!response.ok) throw new Error("Failed to send message");
+  return (await response.json()) as { job_id: string };
+}
+
+export async function getMessages(presentationId: string) {
+  const response = await fetch(`${API_URL}/presentations/${presentationId}/chat`, {
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error("Failed to fetch messages");
+  return (await response.json()) as ChatMessage[];
+}
+
+export type ModelOption = {
+  id: string;
+  ready: boolean;
+};
+
+export type ProviderOption = {
+  name: string;
+  label: string;
+  configured: boolean;
+  models?: ModelOption[];
+};
+
+export type ProvidersResponse = {
+  llm: ProviderOption[];
+  image: ProviderOption[];
+  defaults: { llm: string; image: string };
+};
+
+export async function getProviders() {
+  const response = await fetch(`${API_URL}/providers`, { cache: "no-store" });
+  if (!response.ok) throw new Error("Failed to fetch providers");
+  return (await response.json()) as ProvidersResponse;
 }
