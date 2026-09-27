@@ -14,14 +14,32 @@ router = APIRouter(prefix="/presentations", tags=["presentations"])
 
 TERMINAL_JOB_STATUSES = ("done", "failed", "cancelled")
 
-# If a job hasn't reported a step change in this long, assume the worker
-# died or was restarted mid-task (its message was already acked, so Celery
-# has no way to know it was lost) and self-heal rather than poll forever.
-STALE_JOB_TIMEOUT = timedelta(minutes=3)
+# A single LLM call (e.g. planning 10 slides on a slow local CPU model) can
+# legitimately take longer than this — so once we're past it, we don't just
+# assume the worker died, we actually check with Celery whether the task is
+# still running (see _is_task_active). Only if it's confirmed NOT running do
+# we mark the job failed early. HARD_STALE_TIMEOUT is a fallback ceiling in
+# case the liveness check itself can't be trusted (e.g. broker hiccup).
+SOFT_STALE_TIMEOUT = timedelta(minutes=3)
+HARD_STALE_TIMEOUT = timedelta(minutes=20)
 
 
 def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def _is_task_active(task_id: str) -> bool | None:
+    """Best-effort check via Celery's control/inspect API.
+    True/False = confirmed alive/dead. None = couldn't tell (e.g. a broker
+    hiccup) — callers should treat that as "not confirmed dead", relying on
+    HARD_STALE_TIMEOUT as the backstop instead of failing the job early."""
+    try:
+        active = celery_app.control.inspect(timeout=2).active()
+        if active is None:
+            return None
+        return any(task.get("id") == task_id for tasks in active.values() for task in tasks)
+    except Exception:
+        return None
 
 
 @router.post("")
@@ -76,13 +94,27 @@ def get_status(presentation_id: str, session: Session = Depends(get_session)):
 
     if job and job.status not in TERMINAL_JOB_STATUSES:
         age = datetime.now(UTC) - _as_utc(job.updated_at)
-        if age > STALE_JOB_TIMEOUT:
+        should_fail = False
+        reason = None
+
+        if age > HARD_STALE_TIMEOUT:
+            should_fail = True
+            reason = "This job made no progress for a long time and was stopped."
+        elif age > SOFT_STALE_TIMEOUT:
+            liveness = _is_task_active(job.celery_task_id)
+            if liveness is False:
+                should_fail = True
+                reason = (
+                    "This job stalled with no progress for a while — the worker likely "
+                    "restarted or crashed mid-task. Try generating again."
+                )
+            # liveness True or None (unknown) → a slow-but-alive task (e.g. a
+            # big local model on CPU); keep waiting rather than fail early.
+
+        if should_fail:
             job.status = "failed"
             job.step = "error"
-            job.error = (
-                "This job stalled with no progress for a while — the worker likely "
-                "restarted or crashed mid-task. Try generating again."
-            )
+            job.error = reason
             job.updated_at = datetime.now(UTC)
             session.add(job)
             session.commit()
