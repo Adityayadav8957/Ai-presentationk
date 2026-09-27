@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+psycopg2-binary
+celery
+redis
+flower
+pydantic-settings
+openai
+anthropic
+httpx
+playwright
+python-multipart
