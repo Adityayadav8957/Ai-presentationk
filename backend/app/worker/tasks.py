@@ -1,3 +1,6 @@
+import logging
+from datetime import UTC, datetime
+
 from sqlmodel import Session, select
 
 from app.agents.image_agent import ImageAgent
@@ -14,6 +17,8 @@ from app.providers.llm.ollama_utils import ensure_model_pulled
 from app.providers.llm.registry import get_llm_provider, get_vision_provider
 from app.worker.celery_app import celery_app
 
+logger = logging.getLogger(__name__)
+
 
 def _job_for(session: Session, task_id: str) -> Job | None:
     return session.exec(select(Job).where(Job.celery_task_id == task_id)).first()
@@ -26,10 +31,12 @@ def _ensure_ollama_ready(presentation: Presentation, on_progress) -> None:
 
 
 def _fail_job(session: Session, job: Job | None, presentation: Presentation, exc: Exception) -> None:
+    logger.error("Task failed for presentation=%s: %s", presentation.id, exc)
     if job:
         job.status = "failed"
         job.step = "error"
         job.error = str(exc)
+        job.updated_at = datetime.now(UTC)
         session.add(job)
     presentation.status = "failed"
     session.add(presentation)
@@ -46,6 +53,7 @@ def _run_qa(session: Session, presentation_id: str, slides: list[Slide], llm_pro
 
 @celery_app.task(bind=True, name="generate_presentation")
 def generate_presentation(self, presentation_id: str) -> str:
+    logger.info("generate_presentation: starting presentation=%s task=%s", presentation_id, self.request.id)
     with Session(engine) as session:
         presentation = session.get(Presentation, presentation_id)
         if presentation is None:
@@ -54,9 +62,11 @@ def generate_presentation(self, presentation_id: str) -> str:
         job = _job_for(session, self.request.id)
 
         def on_progress(step: str) -> None:
+            logger.info("generate_presentation: presentation=%s step=%s", presentation_id, step)
             self.update_state(state="PROGRESS", meta={"step": step})
             if job:
                 job.step = step
+                job.updated_at = datetime.now(UTC)
                 session.add(job)
                 session.commit()
 
@@ -91,8 +101,10 @@ def generate_presentation(self, presentation_id: str) -> str:
             if job:
                 job.status = "done"
                 job.step = "final"
+                job.updated_at = datetime.now(UTC)
                 session.add(job)
             session.commit()
+            logger.info("generate_presentation: done presentation=%s (%d slides)", presentation_id, len(slides))
         except Exception as exc:
             _fail_job(session, job, presentation, exc)
             raise
@@ -102,6 +114,12 @@ def generate_presentation(self, presentation_id: str) -> str:
 
 @celery_app.task(bind=True, name="refine_presentation")
 def refine_presentation(self, presentation_id: str, instruction: str) -> str:
+    logger.info(
+        "refine_presentation: starting presentation=%s task=%s instruction=%r",
+        presentation_id,
+        self.request.id,
+        instruction,
+    )
     with Session(engine) as session:
         presentation = session.get(Presentation, presentation_id)
         if presentation is None:
@@ -110,9 +128,11 @@ def refine_presentation(self, presentation_id: str, instruction: str) -> str:
         job = _job_for(session, self.request.id)
 
         def on_progress(step: str) -> None:
+            logger.info("refine_presentation: presentation=%s step=%s", presentation_id, step)
             self.update_state(state="PROGRESS", meta={"step": step})
             if job:
                 job.step = step
+                job.updated_at = datetime.now(UTC)
                 session.add(job)
                 session.commit()
 
@@ -157,8 +177,10 @@ def refine_presentation(self, presentation_id: str, instruction: str) -> str:
             if job:
                 job.status = "done"
                 job.step = "final"
+                job.updated_at = datetime.now(UTC)
                 session.add(job)
             session.commit()
+            logger.info("refine_presentation: done presentation=%s", presentation_id)
         except Exception as exc:
             _fail_job(session, job, presentation, exc)
             raise

@@ -1,3 +1,4 @@
+import logging
 import re
 from collections.abc import Callable
 
@@ -8,6 +9,8 @@ from app.agents.slide_planner import SlidePlannerAgent
 from app.agents.story_agent import StoryAgent
 from app.providers.image.registry import get_image_provider
 from app.providers.llm.registry import get_llm_provider
+
+logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str], None]
 
@@ -44,6 +47,11 @@ class Orchestrator:
                 on_progress(step)
 
         slide_count = _extract_slide_count(brief)
+        logger.info(
+            "Orchestrator: starting pipeline for presentation=%s slide_count=%d",
+            presentation_id,
+            slide_count,
+        )
 
         report("understanding")
         research = self.research_agent.run(brief)
@@ -60,4 +68,9 @@ class Orchestrator:
         report("image_generation")
         slides = self.image_agent.run(slides, presentation_id)
 
+        logger.info(
+            "Orchestrator: pipeline complete for presentation=%s (%d slides)",
+            presentation_id,
+            len(slides),
+        )
         return {"story": story, "research": research, "slides": slides, "theme": theme}

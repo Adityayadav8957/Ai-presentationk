@@ -1,6 +1,10 @@
+import logging
+
 from app.agents.json_utils import extract_json
 from app.agents.slide_planner import SLIDE_SCHEMA_HINT
 from app.providers.llm.base import LLMProvider
+
+logger = logging.getLogger(__name__)
 
 
 class RevisionAgent:
@@ -19,13 +23,24 @@ class RevisionAgent:
             "slides unless the instruction asks to add/remove some.\n"
             f"{SLIDE_SCHEMA_HINT}"
         )
-        response = self.llm.chat([{"role": "user", "content": prompt}], temperature=0.4)
+        logger.info("RevisionAgent: applying instruction=%r to %d slides", instruction, len(current_slides))
+        try:
+            response = self.llm.chat([{"role": "user", "content": prompt}], temperature=0.4)
+        except Exception:
+            logger.exception("RevisionAgent: LLM call failed")
+            raise
 
         try:
             slides = extract_json(response)
             if isinstance(slides, list) and slides:
+                logger.info("RevisionAgent: parsed %d revised slides", len(slides))
                 return slides
+            logger.warning("RevisionAgent: JSON parsed but was not a non-empty list, keeping original slides")
         except ValueError:
-            pass
+            logger.warning(
+                "RevisionAgent: could not parse JSON from model output, keeping original slides. "
+                "Raw response (truncated): %r",
+                response[:500],
+            )
 
         return current_slides

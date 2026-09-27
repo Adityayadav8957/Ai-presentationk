@@ -1,8 +1,11 @@
 import base64
+import logging
 
 from app.agents.json_utils import extract_json
 from app.providers.llm.base import LLMProvider
 from app.rendering.qa_screenshot import screenshot_slide
+
+logger = logging.getLogger(__name__)
 
 QA_PROMPT = (
     "You are a presentation design QA reviewer. Look at this slide screenshot and "
@@ -23,6 +26,7 @@ class QAAgent:
         try:
             image_bytes = screenshot_slide(presentation_id, slide_id)
         except Exception as exc:
+            logger.warning("QAAgent: screenshot failed for slide=%s: %s", slide_id, exc)
             return {"skipped": True, "reason": f"screenshot failed: {exc}"}
 
         b64 = base64.b64encode(image_bytes).decode()
@@ -39,9 +43,18 @@ class QAAgent:
         try:
             response = self.vision_llm.chat(messages)
         except Exception as exc:
+            logger.warning("QAAgent: vision call failed for slide=%s: %s", slide_id, exc)
             return {"skipped": True, "reason": f"vision call failed: {exc}"}
 
         try:
-            return extract_json(response)
+            result = extract_json(response)
+            logger.info(
+                "QAAgent: slide=%s passed=%s issues=%s",
+                slide_id,
+                result.get("passed"),
+                result.get("issues"),
+            )
+            return result
         except ValueError:
+            logger.warning("QAAgent: could not parse QA response for slide=%s", slide_id)
             return {"skipped": True, "reason": "could not parse QA response", "raw": response}

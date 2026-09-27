@@ -1,4 +1,8 @@
+import logging
+
 from app.providers.llm.base import LLMProvider
+
+logger = logging.getLogger(__name__)
 
 
 class ResearchAgent:
@@ -11,5 +15,11 @@ class ResearchAgent:
             "list the factual claims that will be needed, each with a plausible source "
             f"and confidence level.\nBrief: {brief}"
         )
-        response = self.llm.chat([{"role": "user", "content": prompt}])
+        logger.info("ResearchAgent: requesting research notes")
+        try:
+            response = self.llm.chat([{"role": "user", "content": prompt}])
+        except Exception:
+            logger.exception("ResearchAgent: LLM call failed")
+            raise
+        logger.info("ResearchAgent: received %d chars", len(response))
         return {"raw": response, "claims": []}

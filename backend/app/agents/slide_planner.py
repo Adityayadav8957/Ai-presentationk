@@ -1,5 +1,9 @@
+import logging
+
 from app.agents.json_utils import extract_json
 from app.providers.llm.base import LLMProvider
+
+logger = logging.getLogger(__name__)
 
 SLIDE_SCHEMA_HINT = """
 Return ONLY a JSON array, one object per slide, in this exact schema:
@@ -31,14 +35,25 @@ class SlidePlannerAgent:
             f"Produce exactly {slide_count} slides covering this outline, choosing the best "
             f"slide type and elements for each idea.\n{SLIDE_SCHEMA_HINT}"
         )
-        response = self.llm.chat([{"role": "user", "content": prompt}], temperature=0.4)
+        logger.info("SlidePlannerAgent: requesting %d slides", slide_count)
+        try:
+            response = self.llm.chat([{"role": "user", "content": prompt}], temperature=0.4)
+        except Exception:
+            logger.exception("SlidePlannerAgent: LLM call failed")
+            raise
 
         try:
             slides = extract_json(response)
             if isinstance(slides, list) and slides:
+                logger.info("SlidePlannerAgent: parsed %d slides from JSON", len(slides))
                 return slides
+            logger.warning("SlidePlannerAgent: JSON parsed but was not a non-empty list, falling back")
         except ValueError:
-            pass
+            logger.warning(
+                "SlidePlannerAgent: could not parse JSON from model output, falling back. "
+                "Raw response (truncated): %r",
+                response[:500],
+            )
 
         return self._fallback(story_text, slide_count)
 

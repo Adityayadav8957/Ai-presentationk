@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from fastapi import APIRouter, Depends
 from sqlmodel import Session, select
 
@@ -8,6 +10,15 @@ from app.models.slide import Slide
 from app.worker.tasks import generate_presentation
 
 router = APIRouter(prefix="/presentations", tags=["presentations"])
+
+# If a job hasn't reported a step change in this long, assume the worker
+# died or was restarted mid-task (its message was already acked, so Celery
+# has no way to know it was lost) and self-heal rather than poll forever.
+STALE_JOB_TIMEOUT = timedelta(minutes=3)
+
+
+def _as_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 @router.post("")
@@ -52,8 +63,23 @@ def get_presentation(presentation_id: str, session: Session = Depends(get_sessio
 
 @router.get("/{presentation_id}/status")
 def get_status(presentation_id: str, session: Session = Depends(get_session)):
-    return session.exec(
+    job = session.exec(
         select(Job)
         .where(Job.presentation_id == presentation_id)
         .order_by(Job.created_at.desc())
     ).first()
+
+    if job and job.status not in ("done", "failed"):
+        age = datetime.now(UTC) - _as_utc(job.updated_at)
+        if age > STALE_JOB_TIMEOUT:
+            job.status = "failed"
+            job.step = "error"
+            job.error = (
+                "This job stalled with no progress for a while — the worker likely "
+                "restarted or crashed mid-task. Try generating again."
+            )
+            job.updated_at = datetime.now(UTC)
+            session.add(job)
+            session.commit()
+
+    return job

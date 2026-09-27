@@ -1,4 +1,8 @@
+import logging
+
 from app.providers.llm.base import LLMProvider
+
+logger = logging.getLogger(__name__)
 
 THEMES = {
     "minimal": {"primary": "#111111", "accent": "#2563eb", "background": "#ffffff", "font": "Inter, sans-serif"},
@@ -32,4 +36,5 @@ class DesignAgent:
                 break
 
         theme = {"name": theme_name, **THEMES[theme_name]}
+        logger.info("DesignAgent: selected theme=%s", theme_name)
         return slides, theme

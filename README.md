@@ -219,6 +219,21 @@ npm run dev                                # http://localhost:3000
 - **Ollama install:** prefer `brew install --cask ollama` (prebuilt binary)
   over `brew install ollama` (formula), which compiles `llama.cpp` from
   source and is drastically slower.
+- **Worker restarts mid-task orphan the job row.** If `backend`/`worker`
+  restart while a Celery task is running, the process is killed outright —
+  our own `except Exception` handler never runs, so the `Job` row is stuck
+  at its last reported step forever and the frontend polls it endlessly.
+  `GET /presentations/{id}/status` now self-heals this: if a non-terminal
+  job hasn't updated in `STALE_JOB_TIMEOUT` (3 minutes), it's marked
+  `failed` with an explanatory error on the next poll.
+
+### Debugging
+
+Every agent and the Celery tasks log through the standard `logging` module
+(`docker compose logs -f worker`) — each pipeline step, LLM call, JSON
+parse failure/fallback, image generation failure, and QA skip reason is
+logged at INFO/WARNING so you can see exactly what happened without
+reproducing via the API.
 
 ## Current status
 
