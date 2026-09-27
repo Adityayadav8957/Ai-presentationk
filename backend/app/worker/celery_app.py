@@ -16,4 +16,8 @@ celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
+    # Progress/results are tracked entirely via our own Job rows in Postgres,
+    # never via Celery's own result backend — skip it so a terminated task
+    # doesn't fail trying to serialize a SystemExit as its "result".
+    task_ignore_result=True,
 )

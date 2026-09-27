@@ -3,10 +3,13 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 
+import Link from "next/link";
+
 import { SlideRenderer } from "@/components/slides/SlideRenderer";
 import {
   type ChatMessage,
   type ProvidersResponse,
+  cancelGeneration,
   createPresentation,
   getJobStatus,
   getMessages,
@@ -29,6 +32,7 @@ const STEP_LABELS: Record<string, string> = {
   revising: "Revising the presentation",
   designing: "Designing the theme",
   image_generation: "Generating visuals",
+  rendering_html: "Designing each slide",
   qa: "Reviewing quality",
   final: "Finishing up",
 };
@@ -87,6 +91,7 @@ function PresentationApp() {
   const [activeSlide, setActiveSlide] = useState(0);
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cancelled, setCancelled] = useState(false);
   const [providers, setProviders] = useState<ProvidersResponse | null>(null);
   const [llmProvider, setLlmProvider] = useState("");
   const [llmModel, setLlmModel] = useState("");
@@ -116,6 +121,9 @@ function PresentationApp() {
       const job = await getJobStatus(id);
       if (job?.status === "done") {
         setIsBusy(false);
+      } else if (job?.status === "cancelled") {
+        setCancelled(true);
+        setIsBusy(false);
       } else if (job?.status === "failed") {
         setError(job.error ?? "Generation failed for an unknown reason.");
         setIsBusy(false);
@@ -129,6 +137,10 @@ function PresentationApp() {
           },
           (message) => {
             setError(message);
+            setIsBusy(false);
+          },
+          () => {
+            setCancelled(true);
             setIsBusy(false);
           },
         );
@@ -153,18 +165,34 @@ function PresentationApp() {
     setMessages(msgs);
   }
 
-  function pollUntilDone(id: string, onDone: () => void, onFail: (message: string) => void) {
+  function pollUntilDone(
+    id: string,
+    onDone: () => void,
+    onFail: (message: string) => void,
+    onCancel: () => void,
+  ) {
     pollRef.current = setInterval(async () => {
       const job = await getJobStatus(id);
       setStep(job?.step ?? null);
       if (job?.status === "done") {
         if (pollRef.current) clearInterval(pollRef.current);
         onDone();
+      } else if (job?.status === "cancelled") {
+        if (pollRef.current) clearInterval(pollRef.current);
+        onCancel();
       } else if (job?.status === "failed") {
         if (pollRef.current) clearInterval(pollRef.current);
         onFail(job.error ?? "Generation failed for an unknown reason.");
       }
     }, 2000);
+  }
+
+  async function handleCancel() {
+    if (!presentationId) return;
+    if (pollRef.current) clearInterval(pollRef.current);
+    setIsBusy(false);
+    setCancelled(true);
+    await cancelGeneration(presentationId);
   }
 
   async function handleSubmit(presetPrompt?: string) {
@@ -173,6 +201,7 @@ function PresentationApp() {
     setPrompt("");
     setIsBusy(true);
     setError(null);
+    setCancelled(false);
 
     setMessages((prev) => [
       ...prev,
@@ -198,6 +227,10 @@ function PresentationApp() {
           setError(message);
           setIsBusy(false);
         },
+        () => {
+          setCancelled(true);
+          setIsBusy(false);
+        },
       );
       return;
     }
@@ -211,6 +244,10 @@ function PresentationApp() {
       },
       (message) => {
         setError(message);
+        setIsBusy(false);
+      },
+      () => {
+        setCancelled(true);
         setIsBusy(false);
       },
     );
@@ -227,7 +264,12 @@ function PresentationApp() {
   return (
     <div className="grid h-screen grid-cols-[220px_1fr_340px] bg-neutral-50 text-neutral-900">
       <aside className="border-r border-neutral-200 p-4">
-        <h2 className="mb-4 text-sm font-medium text-neutral-500">Slides</h2>
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-sm font-medium text-neutral-500">Slides</h2>
+          <Link href="/decks" className="text-xs text-neutral-400 hover:text-neutral-900 hover:underline">
+            My decks
+          </Link>
+        </div>
         <ul className="flex flex-col gap-2">
           {slides.map((slide, i) => (
             <li key={slide.id}>
@@ -258,12 +300,25 @@ function PresentationApp() {
             <p className="font-medium">Generation failed</p>
             <p className="mt-1 text-xs">{error}</p>
           </div>
+        ) : cancelled && !active ? (
+          <div className="max-w-md rounded-md border border-neutral-200 bg-neutral-100 p-4 text-sm text-neutral-600">
+            <p className="font-medium">Generation cancelled</p>
+            <p className="mt-1 text-xs">You stopped this before it finished.</p>
+          </div>
         ) : active ? (
           <div className="w-full max-w-4xl shadow-lg">
             <SlideRenderer content={active.content} theme={theme} />
           </div>
         ) : isBusy ? (
-          <Loader label={stepLabel(step)} />
+          <div className="flex flex-col items-center gap-6">
+            <Loader label={stepLabel(step)} />
+            <button
+              onClick={handleCancel}
+              className="rounded-md border border-neutral-300 px-4 py-1.5 text-xs font-medium text-neutral-600 hover:border-neutral-400 hover:text-neutral-900"
+            >
+              Stop generating
+            </button>
+          </div>
         ) : (
           <div className="text-center text-neutral-400">
             <span className="text-sm">No presentation yet — describe one on the right.</span>
@@ -353,13 +408,21 @@ function PresentationApp() {
             }
             className="h-24 resize-none rounded-md border border-neutral-200 p-3 text-sm outline-none focus:border-neutral-400"
           />
-          <button
-            onClick={() => handleSubmit()}
-            disabled={isBusy}
-            className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-          >
-            {isBusy ? "Working…" : presentationId ? "Send" : "Generate presentation"}
-          </button>
+          {isBusy ? (
+            <button
+              onClick={handleCancel}
+              className="rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-700 hover:border-neutral-400"
+            >
+              Stop generating
+            </button>
+          ) : (
+            <button
+              onClick={() => handleSubmit()}
+              className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {presentationId ? "Send" : "Generate presentation"}
+            </button>
+          )}
         </div>
       </aside>
     </div>

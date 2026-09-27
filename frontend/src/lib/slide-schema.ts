@@ -17,6 +17,9 @@ export type SlideContent = {
     | "grid";
   title?: string;
   elements: SlideElement[];
+  /** AI-authored HTML/CSS fragment for this slide (HTMLAgent). When present,
+   * this is rendered directly instead of the generic component layout. */
+  html?: string;
 };
 
 export type Theme = {

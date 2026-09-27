@@ -38,6 +38,36 @@ export async function getPresentation(presentationId: string) {
   return response.json();
 }
 
+export type PresentationSummary = {
+  id: string;
+  title: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function listPresentations() {
+  const response = await fetch(`${API_URL}/presentations`, { cache: "no-store" });
+  if (!response.ok) throw new Error("Failed to list presentations");
+  return (await response.json()) as PresentationSummary[];
+}
+
+export async function cancelGeneration(presentationId: string) {
+  const response = await fetch(`${API_URL}/presentations/${presentationId}/cancel`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new Error("Failed to cancel generation");
+  return (await response.json()) as { status: string };
+}
+
+export async function retryPresentation(presentationId: string) {
+  const response = await fetch(`${API_URL}/presentations/${presentationId}/retry`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new Error("Failed to retry presentation");
+  return (await response.json()) as CreatePresentationResponse;
+}
+
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";

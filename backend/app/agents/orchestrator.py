@@ -3,6 +3,7 @@ import re
 from collections.abc import Callable
 
 from app.agents.design_agent import DesignAgent
+from app.agents.html_agent import HTMLAgent
 from app.agents.image_agent import ImageAgent
 from app.agents.research_agent import ResearchAgent
 from app.agents.slide_planner import SlidePlannerAgent
@@ -25,8 +26,9 @@ def _extract_slide_count(brief: dict, default: int = 8) -> int:
 
 class Orchestrator:
     """Runs the content-planning pipeline (research → story → slides →
-    theme → images). Persistence and visual QA happen afterwards in the
-    Celery task, since QA needs slides to already have database ids."""
+    theme → images → per-slide HTML). Persistence and visual QA happen
+    afterwards in the Celery task, since QA needs slides to already have
+    database ids."""
 
     def __init__(
         self,
@@ -40,6 +42,7 @@ class Orchestrator:
         self.slide_planner = SlidePlannerAgent(self.llm)
         self.design_agent = DesignAgent(self.llm)
         self.image_agent = ImageAgent(get_image_provider(image_provider_name))
+        self.html_agent = HTMLAgent(self.llm)
 
     def run(self, brief: dict, presentation_id: str, on_progress: ProgressCallback | None = None) -> dict:
         def report(step: str) -> None:
@@ -67,6 +70,9 @@ class Orchestrator:
 
         report("image_generation")
         slides = self.image_agent.run(slides, presentation_id)
+
+        report("rendering_html")
+        slides = self.html_agent.run(slides, theme, brief)
 
         logger.info(
             "Orchestrator: pipeline complete for presentation=%s (%d slides)",

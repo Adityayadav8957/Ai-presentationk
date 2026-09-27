@@ -46,6 +46,10 @@ happens through the chat panel.
                           ▼
                   IMAGE AGENT (generates + saves slide images)
                           ▼
+          HTML AGENT (one LLM call per slide, IN PARALLEL —
+           theme + that slide's content → a real styled HTML
+           fragment; falls back to the generic layout if it fails)
+                          ▼
                  semantic slide JSON  ──────────►  saved to Postgres
                           │
                           ▼
@@ -67,11 +71,18 @@ happens through the chat panel.
   RevisionAgent → regenerates the deck JSON → re-runs image + QA agents.
 ```
 
-**Key architectural decision:** the AI never outputs pixel coordinates. It
-only produces semantic JSON (`{"type": "data_story", "elements": [...]}`).
-The frontend's layout engine (`frontend/src/lib/layout-engine.ts`) is the
-only thing that turns that into an actual arrangement, which keeps output
-consistent and makes automated QA possible.
+**Key architectural decision:** the AI never places raw pixels by hand. The
+`SlidePlannerAgent`/`RevisionAgent` produce semantic JSON
+(`{"type": "data_story", "elements": [...]}`) — that stays the editable
+source of truth for chat-based revisions. A separate `HTMLAgent` then turns
+each slide's content, plus the deck's shared theme, into an actual styled
+HTML fragment (one LLM call per slide, run in parallel via a thread pool,
+since by this point every slide's content and the theme are already known).
+The frontend renders that HTML directly inside a sandboxed `<iframe>`
+(`sandbox=""` — render-only, no script execution). If HTML generation fails
+for a slide, it falls back to the generic component layout
+(`frontend/src/lib/layout-engine.ts`), so a single bad LLM call never
+breaks the whole deck.
 
 ## LLM / image provider abstraction
 
@@ -130,6 +141,7 @@ ai_presentation/
 │   │   │   ├── slide_planner.py  # structured JSON output + fallback
 │   │   │   ├── design_agent.py   # deterministic theme selection
 │   │   │   ├── image_agent.py    # generates + saves slide images
+│   │   │   ├── html_agent.py     # per-slide HTML generation, run in parallel
 │   │   │   ├── qa_agent.py       # screenshot + vision critique
 │   │   │   ├── revision_agent.py # chat-based whole-deck edits
 │   │   │   └── json_utils.py     # robust JSON extraction from model output
@@ -146,6 +158,7 @@ ai_presentation/
 └── frontend/
     ├── src/app/
     │   ├── page.tsx            # 3-pane UI: slides / canvas / AI chat + provider picker
+    │   ├── decks/page.tsx      # list all presentations, open or retry any of them
     │   └── render/[presentationId]/[slideId]/page.tsx  # bare slide render, used by Playwright for QA
     ├── src/components/slides/  # SlideRenderer + per-element components
     ├── src/lib/
@@ -163,19 +176,28 @@ ai_presentation/
    a refresh resumes the same presentation instead of dropping back to
    blank), and `generate_presentation` is enqueued on Celery.
 3. The worker runs the `Orchestrator` (research → story → structured slide
-   JSON → theme → images), reporting each step through `Job.step`, polled
-   by the frontend.
-4. Slide JSON is saved as `Slide` rows.
+   JSON → theme → images → per-slide HTML, in parallel), reporting each step
+   through `Job.step`, polled by the frontend.
+4. Slide JSON (including each slide's `html`) is saved as `Slide` rows.
 5. For each slide, Playwright screenshots the frontend's own render route
    and a vision-capable model critiques it; the result is stored in
    `Slide.qa_report` (shown as a small indicator dot on the slide thumbnail).
    A screenshot or vision-model failure is recorded and skipped, never fatal.
 6. Job is marked done (or `failed`, with the error surfaced in the UI —
-   job failures no longer hang forever).
+   job failures no longer hang forever; a job stuck mid-step for 3+ minutes
+   with no progress, e.g. from a worker restart, self-heals to `failed` too).
 7. Further prompts ("make this more premium", "shorten slide 5") go through
    `POST /presentations/{id}/chat` → `refine_presentation` → the
    `RevisionAgent` regenerates the whole deck JSON with the instruction
-   applied, then re-runs image generation and QA.
+   applied, then re-runs image generation, HTML generation, and QA.
+8. **Stop generating** (main canvas or chat panel) calls
+   `POST /presentations/{id}/cancel`, which does a real
+   `celery_app.control.revoke(task_id, terminate=True)` — this actually
+   kills the worker process running the task, not just the frontend's
+   poll loop, and marks the `Job` row `cancelled` immediately.
+9. **Your decks** (`/decks`) lists every presentation with its status;
+   **Retry** on any of them (`POST /presentations/{id}/retry`) clears its
+   slides and re-runs `generate_presentation` from the same brief.
 
 ## Local development
 
@@ -241,7 +263,11 @@ Fully working end to end, verified with real requests against a running
 stack (Postgres, Redis, Celery worker, Flower, FastAPI, Next.js):
 
 - Structured content generation (research → story → JSON slides → theme →
-  images), with a plain-text fallback if the model's JSON doesn't parse
+  images → per-slide HTML), with a plain-text fallback if the model's JSON
+  doesn't parse
+- Per-slide HTML generation: each slide gets a real, styled HTML fragment
+  from an LLM call (parallelized across slides), rendered in a sandboxed
+  iframe, with the generic component layout as a fallback if it fails
 - Image generation wired to real slide `image` elements, served via
   `/media`
 - Visual QA: real Playwright screenshot → vision-model critique, stored per
@@ -249,14 +275,24 @@ stack (Postgres, Redis, Celery worker, Flower, FastAPI, Next.js):
 - Chat-based whole-deck revision
 - Provider/model picker in the UI, backed by live model listing where the
   provider supports it
+- Real cancellation — "Stop generating" actually terminates the worker
+  process running the task (`celery_app.control.revoke(..., terminate=True)`),
+  not just the frontend's poll loop
+- A decks list (`/decks`) to see every presentation and retry any of them
 - Job failure handling — failed jobs surface the real error instead of
-  hanging at "queued" forever
+  hanging at "queued" forever; stale jobs (worker died/restarted mid-task)
+  self-heal to `failed` after a timeout instead of polling forever
 - URL-based resume — refreshing `/?id=<presentation>` reloads that
   presentation's state instead of starting over
+- Agent-level logging — every agent and task logs its steps, LLM calls,
+  and failure/fallback reasons (`docker compose logs -f worker`)
 
 What's still simplified and worth revisiting:
-- The layout engine only does a two-column primary/secondary split — no
-  constraint rules (overlap avoidance, min font size, density limits) yet
+- The HTML agent isn't given the other slides' HTML for cross-slide
+  consistency checks — occasional per-slide color/style drift is possible
+  despite the shared theme
+- The generic fallback layout only does a two-column primary/secondary
+  split — no constraint rules (overlap avoidance, min font size)
 - Research agent doesn't track real sources/citations yet
 - Chat revision replaces the whole deck rather than diffing individual
   slides — reliable but wasteful for small edits

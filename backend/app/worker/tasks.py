@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from sqlmodel import Session, select
 
+from app.agents.html_agent import HTMLAgent
 from app.agents.image_agent import ImageAgent
 from app.agents.orchestrator import Orchestrator
 from app.agents.qa_agent import QAAgent
@@ -63,7 +64,6 @@ def generate_presentation(self, presentation_id: str) -> str:
 
         def on_progress(step: str) -> None:
             logger.info("generate_presentation: presentation=%s step=%s", presentation_id, step)
-            self.update_state(state="PROGRESS", meta={"step": step})
             if job:
                 job.step = step
                 job.updated_at = datetime.now(UTC)
@@ -129,7 +129,6 @@ def refine_presentation(self, presentation_id: str, instruction: str) -> str:
 
         def on_progress(step: str) -> None:
             logger.info("refine_presentation: presentation=%s step=%s", presentation_id, step)
-            self.update_state(state="PROGRESS", meta={"step": step})
             if job:
                 job.step = step
                 job.updated_at = datetime.now(UTC)
@@ -153,6 +152,9 @@ def refine_presentation(self, presentation_id: str, instruction: str) -> str:
             on_progress("image_generation")
             image_agent = ImageAgent(get_image_provider(presentation.image_provider))
             revised = image_agent.run(revised, presentation.id)
+
+            on_progress("rendering_html")
+            revised = HTMLAgent(llm).run(revised, presentation.theme or {}, presentation.brief)
 
             for slide in existing:
                 session.delete(slide)
