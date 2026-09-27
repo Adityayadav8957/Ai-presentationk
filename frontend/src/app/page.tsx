@@ -33,6 +33,7 @@ const STEP_LABELS: Record<string, string> = {
   designing: "Designing the theme",
   image_generation: "Generating visuals",
   rendering_html: "Designing each slide",
+  rendering_slides: "Generating each slide",
   qa: "Reviewing quality",
   final: "Finishing up",
 };
@@ -178,6 +179,10 @@ function PresentationApp() {
     onCancel: () => void,
   ) {
     pollRef.current = setInterval(async () => {
+      // Slides are checkpointed to the database one at a time as each
+      // finishes rendering — refetch every tick (not just at the end) so
+      // they appear on screen progressively instead of all at once.
+      await refreshPresentation(id);
       const job = await getJobStatus(id);
       setStep(job?.step ?? null);
       if (job?.status === "done") {
@@ -280,32 +285,43 @@ function PresentationApp() {
           </Link>
         </div>
         <ul className="flex flex-col gap-2">
-          {slides.map((slide, i) => (
-            <li key={slide.id}>
-              <button
-                onClick={() => setActiveSlide(i)}
-                className={`relative w-full rounded-md border px-3 py-2 text-left text-sm ${
-                  i === activeSlide
-                    ? "border-neutral-900 bg-neutral-900 text-white"
-                    : "border-neutral-200 bg-white"
-                }`}
-              >
-                {String(i + 1).padStart(2, "0")}
-                {slide.qa_report?.issues && slide.qa_report.issues.length > 0 && (
-                  <span
-                    title={slide.qa_report.issues.join("; ")}
-                    className="absolute right-2 top-2 h-2 w-2 rounded-full bg-amber-500"
-                  />
-                )}
-              </button>
-            </li>
-          ))}
+          {slides.map((slide, i) => {
+            const rendering = isBusy && !slide.content.html;
+            return (
+              <li key={slide.id}>
+                <button
+                  onClick={() => setActiveSlide(i)}
+                  className={`relative w-full rounded-md border px-3 py-2 text-left text-sm ${
+                    i === activeSlide
+                      ? "border-neutral-900 bg-neutral-900 text-white"
+                      : "border-neutral-200 bg-white"
+                  } ${rendering ? "opacity-60" : ""}`}
+                >
+                  {String(i + 1).padStart(2, "0")}
+                  {rendering && (
+                    <span className="absolute right-2 top-2 h-2 w-2 animate-pulse rounded-full bg-blue-400" />
+                  )}
+                  {slide.qa_report?.issues && slide.qa_report.issues.length > 0 && (
+                    <span
+                      title={slide.qa_report.issues.join("; ")}
+                      className="absolute right-2 top-2 h-2 w-2 rounded-full bg-amber-500"
+                    />
+                  )}
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </aside>
 
       <main className="flex items-center justify-center overflow-auto p-8">
         {active ? (
           <div className="w-full max-w-4xl">
+            {isBusy && (
+              <div className="mb-3 rounded-md border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800">
+                Generating slides — {slides.filter((s) => s.content.html).length} of {slides.length} ready
+              </div>
+            )}
             {error && (
               <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
                 <span className="font-medium">Note: </span>

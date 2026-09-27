@@ -3,8 +3,6 @@ from datetime import UTC, datetime
 
 from sqlmodel import Session, select
 
-from app.agents.html_agent import HTMLAgent
-from app.agents.image_agent import ImageAgent
 from app.agents.orchestrator import Orchestrator
 from app.agents.qa_agent import QAAgent
 from app.agents.revision_agent import RevisionAgent
@@ -17,6 +15,7 @@ from app.providers.image.registry import get_image_provider
 from app.providers.llm.ollama_utils import ensure_model_pulled
 from app.providers.llm.registry import get_llm_provider, get_vision_provider
 from app.worker.celery_app import celery_app
+from app.worker.slide_pipeline import render_slides_in_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -44,25 +43,18 @@ def _fail_job(session: Session, job: Job | None, presentation: Presentation, exc
     session.commit()
 
 
-def _run_qa(
-    session: Session,
-    presentation_id: str,
-    slides: list[Slide],
-    llm_provider_name: str | None,
-    job: Job | None,
-) -> None:
-    qa_agent = QAAgent(get_vision_provider(llm_provider_name))
-    for slide in slides:
-        slide.qa_report = qa_agent.review(presentation_id, slide.id)
+def _persist_bare_slides(session: Session, presentation_id: str, slides: list[dict]) -> list[Slide]:
+    """Writes each slide's semantic content immediately — visible to the
+    frontend right away, even before images/HTML exist for any of them."""
+    rows: list[Slide] = []
+    for position, content in enumerate(slides):
+        slide = Slide(presentation_id=presentation_id, position=position, content=content)
         session.add(slide)
-        # Vision QA is slow (one screenshot + one vision-model call per
-        # slide) — bump updated_at after each slide, not just once for the
-        # whole step, so a legitimately slow multi-slide QA pass doesn't
-        # get mistaken for a dead worker by the staleness check.
-        if job:
-            job.updated_at = datetime.now(UTC)
-            session.add(job)
-        session.commit()
+        rows.append(slide)
+    session.commit()
+    for slide in rows:
+        session.refresh(slide)
+    return rows
 
 
 @celery_app.task(bind=True, name="generate_presentation")
@@ -89,9 +81,8 @@ def generate_presentation(self, presentation_id: str) -> str:
             orchestrator = Orchestrator(
                 llm_provider_name=presentation.llm_provider,
                 llm_model_name=presentation.llm_model,
-                image_provider_name=presentation.image_provider,
             )
-            result = orchestrator.run(presentation.brief, presentation.id, on_progress=on_progress)
+            result = orchestrator.run(presentation.brief, on_progress=on_progress)
 
             presentation.story = {"outline": result["story"]}
             presentation.theme = result["theme"]
@@ -99,20 +90,20 @@ def generate_presentation(self, presentation_id: str) -> str:
             session.add(presentation)
             session.commit()
 
-            slides: list[Slide] = []
-            for position, content in enumerate(result["slides"]):
-                slide = Slide(presentation_id=presentation.id, position=position, content=content)
-                session.add(slide)
-                slides.append(slide)
-            session.commit()
-            for slide in slides:
-                session.refresh(slide)
+            on_progress("rendering_slides")
+            slides = _persist_bare_slides(session, presentation.id, result["slides"])
 
-            if presentation.qa_enabled:
-                on_progress("qa")
-                _run_qa(session, presentation.id, slides, presentation.llm_provider, job)
-            else:
-                logger.info("generate_presentation: QA disabled for presentation=%s, skipping", presentation_id)
+            qa_agent = QAAgent(get_vision_provider(presentation.llm_provider)) if presentation.qa_enabled else None
+            render_slides_in_parallel(
+                presentation_id=presentation.id,
+                slides=slides,
+                theme=result["theme"],
+                brief=presentation.brief,
+                image_provider=get_image_provider(presentation.image_provider),
+                llm=orchestrator.llm,
+                qa_agent=qa_agent,
+                job_id=job.id if job else None,
+            )
 
             if job:
                 job.status = "done"
@@ -165,31 +156,24 @@ def refine_presentation(self, presentation_id: str, instruction: str) -> str:
             on_progress("revising")
             revised = RevisionAgent(llm).run(current_content, instruction)
 
-            on_progress("image_generation")
-            image_agent = ImageAgent(get_image_provider(presentation.image_provider))
-            revised = image_agent.run(revised, presentation.id)
-
-            on_progress("rendering_html")
-            revised = HTMLAgent(llm).run(revised, presentation.theme or {}, presentation.brief)
-
             for slide in existing:
                 session.delete(slide)
             session.commit()
 
-            new_slides: list[Slide] = []
-            for position, content in enumerate(revised):
-                slide = Slide(presentation_id=presentation.id, position=position, content=content)
-                session.add(slide)
-                new_slides.append(slide)
-            session.commit()
-            for slide in new_slides:
-                session.refresh(slide)
+            on_progress("rendering_slides")
+            slides = _persist_bare_slides(session, presentation.id, revised)
 
-            if presentation.qa_enabled:
-                on_progress("qa")
-                _run_qa(session, presentation.id, new_slides, presentation.llm_provider, job)
-            else:
-                logger.info("refine_presentation: QA disabled for presentation=%s, skipping", presentation_id)
+            qa_agent = QAAgent(get_vision_provider(presentation.llm_provider)) if presentation.qa_enabled else None
+            render_slides_in_parallel(
+                presentation_id=presentation.id,
+                slides=slides,
+                theme=presentation.theme or {},
+                brief=presentation.brief,
+                image_provider=get_image_provider(presentation.image_provider),
+                llm=llm,
+                qa_agent=qa_agent,
+                job_id=job.id if job else None,
+            )
 
             session.add(
                 Message(presentation_id=presentation_id, role="assistant", content="Updated the presentation.")

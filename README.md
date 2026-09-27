@@ -44,45 +44,53 @@ happens through the chat panel.
                           ▼
                   DESIGN AGENT (deterministic theme pick)
                           ▼
-                  IMAGE AGENT (generates + saves slide images)
-                          ▼
-          HTML AGENT (one LLM call per slide, IN PARALLEL —
-           theme + that slide's content → a real styled HTML
-           fragment; falls back to the generic layout if it fails)
-                          ▼
-                 semantic slide JSON  ──────────►  saved to Postgres
+        bare slide JSON (no image/html yet) ──► saved to Postgres
+        immediately — the frontend can already show slide count
+        and raw content here, before anything below finishes
                           │
                           ▼
-        Playwright hits the frontend's own
-        /render/:presentationId/:slideId route
-        (same React components the user sees)
-                          │
-                          ▼
-                    screenshot
-                          │
-                          ▼
-          QA AGENT (vision-capable model critiques it;
-           failures/missing models are skipped, never fatal)
-                          │
+      ┌───────────────────┴───────────────────┐
+      │   PER SLIDE, IN PARALLEL (thread pool)  │
+      │                                         │
+      │   IMAGE AGENT → HTML AGENT → (if QA     │
+      │   enabled) screenshot + vision critique  │
+      │                                         │
+      │   each slide commits to Postgres the    │
+      │   moment IT finishes — independent of   │
+      │   every other slide                     │
+      └───────────────────┬───────────────────┘
                           ▼
                     mark job done
 
   Chat follow-ups ("make this more premium") go through a separate
-  RevisionAgent → regenerates the deck JSON → re-runs image + QA agents.
+  RevisionAgent → regenerates the deck JSON → same per-slide parallel
+  render pipeline.
 ```
 
-**Key architectural decision:** the AI never places raw pixels by hand. The
-`SlidePlannerAgent`/`RevisionAgent` produce semantic JSON
-(`{"type": "data_story", "elements": [...]}`) — that stays the editable
-source of truth for chat-based revisions. A separate `HTMLAgent` then turns
-each slide's content, plus the deck's shared theme, into an actual styled
-HTML fragment (one LLM call per slide, run in parallel via a thread pool,
-since by this point every slide's content and the theme are already known).
-The frontend renders that HTML directly inside a sandboxed `<iframe>`
-(`sandbox=""` — render-only, no script execution). If HTML generation fails
-for a slide, it falls back to the generic component layout
-(`frontend/src/lib/layout-engine.ts`), so a single bad LLM call never
-breaks the whole deck.
+**Key architectural decisions:**
+
+1. The AI never places raw pixels by hand. The `SlidePlannerAgent`/
+   `RevisionAgent` produce semantic JSON
+   (`{"type": "data_story", "elements": [...]}`) — that stays the editable
+   source of truth. A separate `HTMLAgent` then turns each slide's content,
+   plus the deck's shared theme, into an actual styled HTML fragment. The
+   frontend renders that HTML directly inside a sandboxed `<iframe>`
+   (`sandbox=""` — render-only, no script execution). If HTML generation
+   fails for a slide, it falls back to the generic component layout
+   (`frontend/src/lib/layout-engine.ts`), so a single bad LLM call never
+   breaks the whole deck.
+
+2. **Slides render progressively, checkpointed one at a time.** Planning
+   (research → story → slide JSON → theme) is inherently sequential and
+   runs once for the whole deck, but everything after that — image
+   generation, HTML generation, and QA — happens **per slide, in
+   parallel**, each on its own thread with its own database session. The
+   moment one slide's HTML (and QA, if enabled) is ready, that slide's row
+   is committed immediately — not held in memory until the whole deck
+   finishes. The frontend polls the presentation while a job is running
+   (not just once at the end), so slides pop in one at a time as they
+   complete, and if the worker crashes or is restarted mid-deck, whatever
+   slides already finished are not lost.
 
 ## LLM / image provider abstraction
 
@@ -148,7 +156,8 @@ ai_presentation/
 │   │   │   └── json_utils.py     # robust JSON extraction from model output
 │   │   ├── worker/
 │   │   │   ├── celery_app.py   # Celery configured against Redis
-│   │   │   └── tasks.py        # generate_presentation / refine_presentation
+│   │   │   ├── tasks.py        # generate_presentation / refine_presentation (planning only)
+│   │   │   └── slide_pipeline.py # per-slide image+HTML+QA, parallel, checkpointed to Postgres
 │   │   ├── rendering/
 │   │   │   └── qa_screenshot.py # Playwright screenshot of the frontend's render route
 │   │   ├── media/               # generated images (gitignored, served at /media)
@@ -176,21 +185,29 @@ ai_presentation/
 2. Backend creates a `Presentation` row, the URL updates to `/?id=<id>` (so
    a refresh resumes the same presentation instead of dropping back to
    blank), and `generate_presentation` is enqueued on Celery.
-3. The worker runs the `Orchestrator` (research → story → structured slide
-   JSON → theme → images → per-slide HTML, in parallel), reporting each step
-   through `Job.step`, polled by the frontend.
-4. Slide JSON (including each slide's `html`) is saved as `Slide` rows.
-5. For each slide, Playwright screenshots the frontend's own render route
-   and a vision-capable model critiques it; the result is stored in
-   `Slide.qa_report` (shown as a small indicator dot on the slide thumbnail).
-   A screenshot or vision-model failure is recorded and skipped, never fatal.
+3. The worker runs the `Orchestrator` — research → story → structured slide
+   JSON → theme — reporting each step through `Job.step`, polled by the
+   frontend. This part is sequential (each step needs the last).
+4. The resulting bare slide JSON is saved as `Slide` rows immediately, one
+   `INSERT` per slide, before any image or HTML exists for them — the
+   frontend (which polls the presentation, not just the job, while it's
+   running) can already show the deck's slide count and raw content here.
+5. `render_slides_in_parallel` then processes every slide **concurrently**,
+   one thread per slide: generate its image(s) → generate its HTML → (if
+   QA is enabled) screenshot + vision critique. The moment a slide's own
+   work finishes, that slide's row is committed — independently of every
+   other slide, using its own database session. Slides visibly pop in on
+   screen one at a time as they complete, not all at once at the end. A
+   screenshot or vision-model failure only affects that slide's
+   `qa_report`, never the rest of the deck.
 6. Job is marked done (or `failed`, with the error surfaced in the UI —
-   job failures no longer hang forever; a job stuck mid-step for 3+ minutes
-   with no progress, e.g. from a worker restart, self-heals to `failed` too).
+   job failures no longer hang forever). Past 3 minutes with no progress,
+   the status endpoint asks Celery whether the task is actually still
+   running before deciding it's dead — see "Gotchas" below.
 7. Further prompts ("make this more premium", "shorten slide 5") go through
    `POST /presentations/{id}/chat` → `refine_presentation` → the
    `RevisionAgent` regenerates the whole deck JSON with the instruction
-   applied, then re-runs image generation, HTML generation, and QA.
+   applied, then goes through the same per-slide parallel render pipeline.
 8. **Stop generating** (main canvas or chat panel) calls
    `POST /presentations/{id}/cancel`, which does a real
    `celery_app.control.revoke(task_id, terminate=True)` — this actually
@@ -244,18 +261,27 @@ npm run dev                                # http://localhost:3000
   source and is drastically slower.
 - **Worker restarts mid-task orphan the job row.** If `backend`/`worker`
   restart while a Celery task is running, the process is killed outright —
-  our own `except Exception` handler never runs, so the `Job` row is stuck
-  at its last reported step forever and the frontend polls it endlessly.
-  `GET /presentations/{id}/status` now self-heals this: if a non-terminal
-  job hasn't updated in `STALE_JOB_TIMEOUT` (3 minutes), it's marked
-  `failed` with an explanatory error on the next poll.
-- **QA is genuinely slow, and a single "qa" step can legitimately take
-  longer than the staleness timeout** (one screenshot + one vision-model
-  call per slide, sequentially). This looked identical to a dead worker
-  and falsely marked healthy jobs as failed. Fixed by bumping the job's
-  timestamp after each slide's QA completes, not just once for the whole
-  step — but QA is also slow enough that it's now **off by default**, with
-  a UI toggle ("Run visual QA") explaining the tradeoff.
+  our own `except Exception` handler never runs, so the `Job` row would be
+  stuck at its last reported step forever and the frontend would poll it
+  endlessly.
+- **A single LLM call can legitimately take longer than any reasonable
+  fixed timeout** — confirmed directly: `SlidePlannerAgent` took ~4m45s
+  planning 10 slides on a local CPU model, well past an earlier 3-minute
+  cutoff, while the task was still completely healthy. A wall-clock-only
+  staleness check can't tell "slow" from "dead". `GET /presentations/{id}/status`
+  now uses both: past `SOFT_STALE_TIMEOUT` (3 min) with no progress, it
+  asks Celery's `control.inspect().active()` whether the task is actually
+  still running — confirmed alive (or undeterminable, e.g. a broker
+  hiccup) keeps waiting; confirmed dead marks it `failed` immediately.
+  `HARD_STALE_TIMEOUT` (20 min) is a backstop in case liveness can never
+  be confirmed. The per-slide parallel pipeline (see Architecture) also
+  helps here directly — instead of one giant step covering the whole
+  deck, each slide checkpoints (and bumps the job's timestamp) the moment
+  it finishes, so the staleness clock resets constantly during normal
+  operation rather than only at a few big step boundaries.
+- **QA (screenshot + vision-model critique) is genuinely slow** — one
+  extra model call per slide — so it's **off by default**, with a UI
+  toggle ("Run visual QA") explaining the tradeoff.
 - **A failed job doesn't mean the content is gone.** The frontend used to
   hide the slide canvas entirely behind a red error box whenever the job
   ended in `failed` — even if generation had actually completed and only a
@@ -286,12 +312,17 @@ reproducing via the API.
 Fully working end to end, verified with real requests against a running
 stack (Postgres, Redis, Celery worker, Flower, FastAPI, Next.js):
 
-- Structured content generation (research → story → JSON slides → theme →
-  images → per-slide HTML), with a plain-text fallback if the model's JSON
-  doesn't parse
+- Structured content generation (research → story → JSON slides → theme),
+  with a plain-text fallback if the model's JSON doesn't parse
+- Progressive, checkpointed, parallel per-slide rendering: image
+  generation → HTML generation → (if enabled) QA all happen per slide, on
+  their own thread, committed to Postgres the moment that slide finishes —
+  not held in memory until the whole deck completes. The frontend polls
+  the presentation while a job runs and slides appear on screen one at a
+  time as they're ready, with a live "N of M ready" indicator
 - Per-slide HTML generation: each slide gets a real, styled HTML fragment
-  from an LLM call (parallelized across slides), rendered in a sandboxed
-  iframe, with the generic component layout as a fallback if it fails
+  from an LLM call, rendered in a sandboxed iframe, with the generic
+  component layout as a fallback if it fails
 - Image generation wired to real slide `image` elements, served via
   `/media`
 - Visual QA (opt-in, off by default — it's slow): real Playwright
@@ -331,3 +362,9 @@ What's still simplified and worth revisiting:
 - Version history per presentation
 - Context-aware, scoped chat editing (element / slide / deck / narrative)
 - Targeted slide-level revision instead of whole-deck regeneration
+- Smarter retry: since slides now checkpoint independently, `Retry` could
+  skip slides that already rendered successfully instead of wiping the
+  whole deck — not yet implemented, currently still a full restart
+- An estimated-time indicator based on provider/model speed and slide
+  count (not implemented — needs a clearer spec for what "estimate" should
+  be based on before building it)

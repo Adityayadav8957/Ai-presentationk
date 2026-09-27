@@ -3,12 +3,9 @@ import re
 from collections.abc import Callable
 
 from app.agents.design_agent import DesignAgent
-from app.agents.html_agent import HTMLAgent
-from app.agents.image_agent import ImageAgent
 from app.agents.research_agent import ResearchAgent
 from app.agents.slide_planner import SlidePlannerAgent
 from app.agents.story_agent import StoryAgent
-from app.providers.image.registry import get_image_provider
 from app.providers.llm.registry import get_llm_provider
 
 logger = logging.getLogger(__name__)
@@ -25,36 +22,27 @@ def _extract_slide_count(brief: dict, default: int = 8) -> int:
 
 
 class Orchestrator:
-    """Runs the content-planning pipeline (research → story → slides →
-    theme → images → per-slide HTML). Persistence and visual QA happen
-    afterwards in the Celery task, since QA needs slides to already have
-    database ids."""
+    """Runs only the sequential planning pipeline (research → story → bare
+    slide JSON → theme). Slides come back with no images or HTML yet —
+    that part runs afterwards, in parallel and checkpointed per slide, in
+    app.worker.slide_pipeline, since it needs database ids and benefits
+    from concurrency that planning (each step depends on the last) does
+    not."""
 
-    def __init__(
-        self,
-        llm_provider_name: str | None = None,
-        llm_model_name: str | None = None,
-        image_provider_name: str | None = None,
-    ):
+    def __init__(self, llm_provider_name: str | None = None, llm_model_name: str | None = None):
         self.llm = get_llm_provider(llm_provider_name, llm_model_name)
         self.research_agent = ResearchAgent(self.llm)
         self.story_agent = StoryAgent(self.llm)
         self.slide_planner = SlidePlannerAgent(self.llm)
         self.design_agent = DesignAgent(self.llm)
-        self.image_agent = ImageAgent(get_image_provider(image_provider_name))
-        self.html_agent = HTMLAgent(self.llm)
 
-    def run(self, brief: dict, presentation_id: str, on_progress: ProgressCallback | None = None) -> dict:
+    def run(self, brief: dict, on_progress: ProgressCallback | None = None) -> dict:
         def report(step: str) -> None:
             if on_progress:
                 on_progress(step)
 
         slide_count = _extract_slide_count(brief)
-        logger.info(
-            "Orchestrator: starting pipeline for presentation=%s slide_count=%d",
-            presentation_id,
-            slide_count,
-        )
+        logger.info("Orchestrator: starting planning, slide_count=%d", slide_count)
 
         report("understanding")
         research = self.research_agent.run(brief)
@@ -68,15 +56,5 @@ class Orchestrator:
         report("designing")
         slides, theme = self.design_agent.run(slides, brief)
 
-        report("image_generation")
-        slides = self.image_agent.run(slides, presentation_id)
-
-        report("rendering_html")
-        slides = self.html_agent.run(slides, theme, brief)
-
-        logger.info(
-            "Orchestrator: pipeline complete for presentation=%s (%d slides)",
-            presentation_id,
-            len(slides),
-        )
+        logger.info("Orchestrator: planning complete (%d slides)", len(slides))
         return {"story": story, "research": research, "slides": slides, "theme": theme}

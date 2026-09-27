@@ -70,7 +70,7 @@ class HTMLAgent:
         self.llm = llm
         self.max_workers = max_workers
 
-    def _render_one(self, index: int, slide: dict, theme: dict, brief: dict) -> dict:
+    def render_one(self, index: int, slide: dict, theme: dict, brief: dict) -> dict:
         example = pick_example(slide.get("type", ""), index)
         prompt = (
             f"{HTML_INSTRUCTIONS}\n\n"
@@ -99,7 +99,7 @@ class HTMLAgent:
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             return list(
                 pool.map(
-                    lambda pair: self._render_one(pair[0], pair[1], theme, brief),
+                    lambda pair: self.render_one(pair[0], pair[1], theme, brief),
                     enumerate(slides),
                 )
             )
