@@ -126,9 +126,9 @@ function QuestionPanel({
                   </button>
                 ))}
               </div>
-            ) : (
+            ) : q.options && q.options.length > 0 ? (
               <div className="flex flex-wrap gap-2">
-                {(q.options as string[] | undefined)?.map((opt) => (
+                {(q.options as string[]).map((opt) => (
                   <button
                     key={opt}
                     onClick={() => setValues((v) => ({ ...v, [q.id]: opt }))}
@@ -142,6 +142,14 @@ function QuestionPanel({
                   </button>
                 ))}
               </div>
+            ) : (
+              <input
+                type="text"
+                value={values[q.id] ?? ""}
+                onChange={(e) => setValues((v) => ({ ...v, [q.id]: e.target.value }))}
+                placeholder="Type your answer…"
+                className="w-full rounded-md border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-neutral-400"
+              />
             )}
           </div>
         ))}
