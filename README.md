@@ -259,6 +259,20 @@ ai_presentation/
 9. **Your decks** (`/decks`) lists every presentation with its status;
    **Retry** on any of them (`POST /presentations/{id}/retry`) clears its
    slides and re-runs `generate_presentation` from the same brief.
+10. **Adding/deleting a slide** is deterministic, not chat/LLM-parsed —
+    `POST /presentations/{id}/slides` (`{"description": "..."}`) inserts a
+    placeholder row at the requested position (default: end) immediately,
+    shifts every later slide's `position` up by one, and enqueues
+    `render_new_slide`, a small Celery task that plans that one slide's
+    content from its description (via `SlidePlannerAgent.run(brief,
+    description, 1)`, reusing the same agent as full-deck planning) and
+    renders it through the same image + HTML pipeline as any other slide.
+    The frontend sees it exactly like any in-progress slide: bare content
+    first, upgraded to real HTML moments later, independent of whether a
+    full-deck job is running. `DELETE /presentations/{id}/slides/{slide_id}`
+    removes a row and reindexes every later slide's `position` down by one.
+    Both are disabled in the UI while a full generation is in flight, to
+    avoid racing the parallel per-slide pipeline over `position` values.
 
 ## Guided mode: the AI asks clarifying questions
 
@@ -441,6 +455,16 @@ stack (Postgres, Redis, Celery worker, Flower, FastAPI, Next.js):
   presentation's state instead of starting over
 - Agent-level logging — every agent and task logs its steps, LLM calls,
   and failure/fallback reasons (`docker compose logs -f worker`)
+- Deterministic add/delete slide — a dedicated sidebar control inserts or
+  removes a slide by position without going through chat/LLM instruction
+  parsing; confirmed directly against a live 12-slide deck (add appended a
+  13th slide, rendered to real HTML in ~60s; delete removed a middle slide
+  and correctly reindexed every slide after it)
+- Redesigned app shell — a header bar (branding + "New presentation"),
+  slide-count in the sidebar heading, keyboard left/right arrow navigation
+  between slides with a counter under the canvas, and the provider/model/QA/
+  guided-mode controls collapsed into a single "Settings" section so the
+  chat input stays the visual focus of the right-hand panel
 
 What's still simplified and worth revisiting:
 - The HTML agent isn't given the other slides' HTML for cross-slide

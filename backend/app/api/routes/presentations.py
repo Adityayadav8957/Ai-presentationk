@@ -11,7 +11,7 @@ from app.models.presentation import Presentation
 from app.models.slide import Slide
 from app.providers.llm.registry import get_llm_provider
 from app.worker.celery_app import celery_app
-from app.worker.tasks import generate_presentation
+from app.worker.tasks import generate_presentation, render_new_slide
 
 router = APIRouter(prefix="/presentations", tags=["presentations"])
 
@@ -235,3 +235,68 @@ def retry_presentation(presentation_id: str, session: Session = Depends(get_sess
     session.commit()
 
     return {"presentation_id": presentation.id, "job_id": job.id}
+
+
+@router.post("/{presentation_id}/slides")
+def add_slide(presentation_id: str, payload: dict, session: Session = Depends(get_session)):
+    """Adds one new slide, deterministically (not via chat/LLM instruction
+    parsing) — inserts a placeholder row immediately at the requested
+    position, then renders its real content in the background. The
+    frontend sees it the same way it sees any in-progress slide: bare
+    content first, upgraded to real HTML moments later."""
+    presentation = session.get(Presentation, presentation_id)
+    if presentation is None:
+        return {"error": "presentation not found"}
+
+    description = str(payload.get("description", "")).strip()
+    if not description:
+        return {"error": "description is required"}
+
+    existing = session.exec(
+        select(Slide).where(Slide.presentation_id == presentation_id).order_by(Slide.position)
+    ).all()
+
+    requested_position = payload.get("position")
+    insert_at = len(existing) if requested_position is None else int(requested_position)
+    insert_at = max(0, min(insert_at, len(existing)))
+
+    for slide in existing:
+        if slide.position >= insert_at:
+            slide.position += 1
+            session.add(slide)
+
+    placeholder = {
+        "type": "data_story",
+        "title": description[:60],
+        "elements": [{"type": "text", "text": description}],
+    }
+    new_slide = Slide(presentation_id=presentation_id, position=insert_at, content=placeholder)
+    session.add(new_slide)
+    session.commit()
+    session.refresh(new_slide)
+
+    render_new_slide.delay(presentation_id, new_slide.id, description)
+
+    return {"slide_id": new_slide.id}
+
+
+@router.delete("/{presentation_id}/slides/{slide_id}")
+def delete_slide(presentation_id: str, slide_id: str, session: Session = Depends(get_session)):
+    slide = session.get(Slide, slide_id)
+    if slide is None or slide.presentation_id != presentation_id:
+        return {"error": "slide not found"}
+
+    removed_position = slide.position
+    session.delete(slide)
+    session.commit()
+
+    remaining = session.exec(
+        select(Slide).where(Slide.presentation_id == presentation_id).order_by(Slide.position)
+    ).all()
+    for s in remaining:
+        if s.position > removed_position:
+            s.position -= 1
+            session.add(s)
+    session.commit()
+
+    return {"status": "deleted"}

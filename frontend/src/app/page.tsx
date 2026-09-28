@@ -11,9 +11,11 @@ import {
   type ProvidersResponse,
   type Question,
   type ThemeOption,
+  addSlide,
   answerQuestions,
   cancelGeneration,
   createPresentation,
+  deleteSlide,
   getJobStatus,
   getMessages,
   getPresentation,
@@ -205,7 +207,12 @@ function PresentationApp() {
   const [qaEnabled, setQaEnabled] = useState(false);
   const [guidedMode, setGuidedMode] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<Question[] | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [addingSlideOpen, setAddingSlideOpen] = useState(false);
+  const [newSlideText, setNewSlideText] = useState("");
+  const [renderingSlideIds, setRenderingSlideIds] = useState<Set<string>>(new Set());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const addSlidePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     getProviders().then((data) => {
@@ -250,8 +257,6 @@ function PresentationApp() {
             setIsBusy(false);
           },
           async (message) => {
-            // Content generated before the failure is still worth showing —
-            // only the error banner used to hide it, now it doesn't.
             await Promise.all([refreshPresentation(id), refreshMessages(id)]);
             setError(message);
             setIsBusy(false);
@@ -266,6 +271,18 @@ function PresentationApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Left/right arrow keys move between slides, unless the user is typing.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const tag = (document.activeElement?.tagName ?? "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || pendingQuestions) return;
+      if (e.key === "ArrowRight") setActiveSlide((i) => Math.min(i + 1, slides.length - 1));
+      if (e.key === "ArrowLeft") setActiveSlide((i) => Math.max(i - 1, 0));
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [slides.length, pendingQuestions]);
+
   function handleLlmProviderChange(name: string) {
     setLlmProvider(name);
     setLlmModel(providers?.llm.find((p) => p.name === name)?.models?.[0]?.id ?? "");
@@ -276,6 +293,7 @@ function PresentationApp() {
     setSlides(data.slides ?? []);
     setTheme(data.presentation?.theme);
     setPendingQuestions(data.presentation?.pending_questions?.questions ?? null);
+    return data;
   }
 
   async function refreshMessages(id: string) {
@@ -321,6 +339,23 @@ function PresentationApp() {
     await cancelGeneration(presentationId);
   }
 
+  function handleNewPresentation() {
+    if (pollRef.current) clearInterval(pollRef.current);
+    if (addSlidePollRef.current) clearInterval(addSlidePollRef.current);
+    setPresentationId(null);
+    setSlides([]);
+    setMessages([]);
+    setActiveSlide(0);
+    setIsBusy(false);
+    setError(null);
+    setCancelled(false);
+    setPendingQuestions(null);
+    setPrompt("");
+    setRenderingSlideIds(new Set());
+    setAddingSlideOpen(false);
+    router.replace("/");
+  }
+
   async function handleSubmit(presetPrompt?: string) {
     const currentPrompt = presetPrompt ?? prompt;
     if (!currentPrompt.trim() || isBusy || pendingQuestions) return;
@@ -345,6 +380,7 @@ function PresentationApp() {
       });
       const presentation_id = resp.presentation_id;
       setPresentationId(presentation_id);
+      setSettingsOpen(false);
       router.replace(`/?id=${presentation_id}`);
 
       if ("needs_input" in resp && resp.needs_input) {
@@ -415,259 +451,404 @@ function PresentationApp() {
     );
   }
 
+  async function handleAddSlide() {
+    const description = newSlideText.trim();
+    if (!presentationId || !description) return;
+    setAddingSlideOpen(false);
+    setNewSlideText("");
+
+    const { slide_id } = await addSlide(presentationId, description);
+    setRenderingSlideIds((prev) => new Set(prev).add(slide_id));
+    await refreshPresentation(presentationId);
+    setActiveSlide(slides.length); // jump toward the new (appended) slide
+
+    let attempts = 0;
+    if (addSlidePollRef.current) clearInterval(addSlidePollRef.current);
+    addSlidePollRef.current = setInterval(async () => {
+      attempts += 1;
+      const data = await refreshPresentation(presentationId);
+      const newSlide = (data.slides ?? []).find((s: Slide) => s.id === slide_id);
+      if (newSlide?.content?.html || attempts > 30) {
+        if (addSlidePollRef.current) clearInterval(addSlidePollRef.current);
+        setRenderingSlideIds((prev) => {
+          const next = new Set(prev);
+          next.delete(slide_id);
+          return next;
+        });
+      }
+    }, 2000);
+  }
+
+  async function handleDeleteSlide(slideId: string) {
+    if (!presentationId) return;
+    await deleteSlide(presentationId, slideId);
+    const data = await refreshPresentation(presentationId);
+    const count = data.slides?.length ?? 0;
+    setActiveSlide((prev) => Math.max(0, Math.min(prev, count - 1)));
+  }
+
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
+      if (addSlidePollRef.current) clearInterval(addSlidePollRef.current);
     };
   }, []);
 
   const active = slides[activeSlide];
+  const isSlideRendering = (s: Slide) => (isBusy || renderingSlideIds.has(s.id)) && !s.content.html;
+  const canManageSlides = !!presentationId && !isBusy;
 
   return (
-    <div className="grid h-screen grid-cols-[220px_1fr_340px] bg-neutral-50 text-neutral-900">
-      <aside className="border-r border-neutral-200 p-4">
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-sm font-medium text-neutral-500">Slides</h2>
-          <Link href="/decks" className="text-xs text-neutral-400 hover:text-neutral-900 hover:underline">
+    <div className="flex h-screen flex-col bg-neutral-50 text-neutral-900">
+      <header className="flex h-14 flex-none items-center justify-between border-b border-neutral-200 bg-white px-5">
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-7 w-7 items-center justify-center rounded-md bg-neutral-900 text-xs font-bold text-white">
+            P
+          </div>
+          <span className="text-sm font-semibold text-neutral-900">Presentation Studio</span>
+        </div>
+        <div className="flex items-center gap-4">
+          <Link href="/decks" className="text-sm text-neutral-500 hover:text-neutral-900">
             My decks
           </Link>
+          <button
+            onClick={handleNewPresentation}
+            className="rounded-md border border-neutral-200 px-3 py-1.5 text-xs font-medium text-neutral-700 hover:border-neutral-400"
+          >
+            + New presentation
+          </button>
         </div>
-        <ul className="flex flex-col gap-2">
-          {slides.map((slide, i) => {
-            const rendering = isBusy && !slide.content.html;
-            return (
-              <li key={slide.id}>
-                <button
-                  onClick={() => setActiveSlide(i)}
-                  className={`relative w-full rounded-md border px-3 py-2 text-left text-sm ${
-                    i === activeSlide
-                      ? "border-neutral-900 bg-neutral-900 text-white"
-                      : "border-neutral-200 bg-white"
-                  } ${rendering ? "opacity-60" : ""}`}
-                >
-                  {String(i + 1).padStart(2, "0")}
-                  {rendering && (
-                    <>
-                      <span className="absolute right-2 top-2 h-2 w-2 animate-pulse rounded-full bg-blue-400" />
-                      <span className="absolute inset-x-2 bottom-1 h-0.5 animate-shimmer rounded-full" />
-                    </>
-                  )}
-                  {slide.qa_report?.issues && slide.qa_report.issues.length > 0 && (
-                    <span
-                      title={slide.qa_report.issues.join("; ")}
-                      className="absolute right-2 top-2 h-2 w-2 rounded-full bg-amber-500"
-                    />
-                  )}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </aside>
+      </header>
 
-      <main className="flex items-center justify-center overflow-auto p-8">
-        {pendingQuestions ? (
-          <QuestionPanel questions={pendingQuestions} onSubmit={handleAnswerSubmit} />
-        ) : active ? (
-          <div className="w-full max-w-4xl">
-            {isBusy && (
-              <div className="mb-3 flex items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
-                <span className="h-2 w-2 flex-none animate-pulse rounded-full bg-blue-500" />
-                <span className="flex-1">
-                  {stepLabel(step)} — {slides.filter((s) => s.content.html).length} of {slides.length} slides ready
-                </span>
-                <div className="h-1.5 w-20 flex-none overflow-hidden rounded-full bg-blue-200">
-                  <div
-                    className="h-full rounded-full bg-blue-500 transition-all duration-500"
-                    style={{
-                      width: `${
-                        slides.length
-                          ? (slides.filter((s) => s.content.html).length / slides.length) * 100
-                          : 0
-                      }%`,
+      <div className="grid flex-1 grid-cols-[240px_1fr_360px] overflow-hidden">
+        <aside className="flex flex-col overflow-y-auto border-r border-neutral-200 bg-white p-4">
+          <h2 className="mb-3 text-sm font-medium text-neutral-500">
+            Slides{slides.length > 0 ? ` (${slides.length})` : ""}
+          </h2>
+          <ul className="flex flex-col gap-2">
+            {slides.map((slide, i) => {
+              const rendering = isSlideRendering(slide);
+              return (
+                <li key={slide.id} className="group relative">
+                  <button
+                    onClick={() => setActiveSlide(i)}
+                    className={`relative w-full rounded-md border px-3 py-2 text-left text-sm ${
+                      i === activeSlide
+                        ? "border-neutral-900 bg-neutral-900 text-white"
+                        : "border-neutral-200 bg-white hover:border-neutral-300"
+                    } ${rendering ? "opacity-60" : ""}`}
+                  >
+                    {String(i + 1).padStart(2, "0")}
+                    {rendering && (
+                      <>
+                        <span className="absolute right-2 top-2 h-2 w-2 animate-pulse rounded-full bg-blue-400" />
+                        <span className="absolute inset-x-2 bottom-1 h-0.5 animate-shimmer rounded-full" />
+                      </>
+                    )}
+                    {slide.qa_report?.issues && slide.qa_report.issues.length > 0 && (
+                      <span
+                        title={slide.qa_report.issues.join("; ")}
+                        className="absolute right-2 top-2 h-2 w-2 rounded-full bg-amber-500"
+                      />
+                    )}
+                  </button>
+                  {canManageSlides && !rendering && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteSlide(slide.id);
+                      }}
+                      title="Delete slide"
+                      className="absolute -right-1.5 -top-1.5 hidden h-5 w-5 items-center justify-center rounded-full bg-neutral-900 text-[10px] text-white hover:bg-red-600 group-hover:flex"
+                    >
+                      ×
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+
+          {canManageSlides &&
+            (addingSlideOpen ? (
+              <div className="mt-3 flex flex-col gap-2">
+                <textarea
+                  value={newSlideText}
+                  onChange={(e) => setNewSlideText(e.target.value)}
+                  placeholder="Describe the new slide…"
+                  autoFocus
+                  className="h-16 resize-none rounded-md border border-neutral-200 p-2 text-xs outline-none focus:border-neutral-400"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setAddingSlideOpen(false);
+                      setNewSlideText("");
                     }}
-                  />
+                    className="flex-1 rounded-md border border-neutral-200 px-2 py-1.5 text-xs text-neutral-500 hover:border-neutral-400"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleAddSlide}
+                    disabled={!newSlideText.trim()}
+                    className="flex-1 rounded-md bg-neutral-900 px-2 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+                  >
+                    Add
+                  </button>
                 </div>
               </div>
-            )}
-            {error && (
-              <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-                <span className="font-medium">Note: </span>
-                {error}
+            ) : (
+              <button
+                onClick={() => setAddingSlideOpen(true)}
+                className="mt-3 flex items-center justify-center gap-1.5 rounded-md border border-dashed border-neutral-300 py-2 text-xs font-medium text-neutral-500 hover:border-neutral-400 hover:text-neutral-700"
+              >
+                + Add slide
+              </button>
+            ))}
+        </aside>
+
+        <main className="flex flex-col items-center justify-center overflow-auto bg-neutral-100 p-8">
+          {pendingQuestions ? (
+            <QuestionPanel questions={pendingQuestions} onSubmit={handleAnswerSubmit} />
+          ) : active ? (
+            <div className="w-full max-w-4xl">
+              {isBusy && (
+                <div className="mb-3 flex items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                  <span className="h-2 w-2 flex-none animate-pulse rounded-full bg-blue-500" />
+                  <span className="flex-1">
+                    {stepLabel(step)} — {slides.filter((s) => s.content.html).length} of {slides.length} slides ready
+                  </span>
+                  <div className="h-1.5 w-20 flex-none overflow-hidden rounded-full bg-blue-200">
+                    <div
+                      className="h-full rounded-full bg-blue-500 transition-all duration-500"
+                      style={{
+                        width: `${
+                          slides.length
+                            ? (slides.filter((s) => s.content.html).length / slides.length) * 100
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+              {error && (
+                <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                  <span className="font-medium">Note: </span>
+                  {error}
+                </div>
+              )}
+              <div className="shadow-lg ring-1 ring-black/5">
+                {isSlideRendering(active) ? (
+                  <SlideSkeleton />
+                ) : (
+                  <SlideRenderer content={active.content} theme={theme} />
+                )}
+              </div>
+              <div className="mt-4 flex items-center justify-center gap-3">
+                <button
+                  onClick={() => setActiveSlide((i) => Math.max(0, i - 1))}
+                  disabled={activeSlide === 0}
+                  className="flex h-7 w-7 items-center justify-center rounded-md border border-neutral-200 bg-white text-neutral-500 hover:border-neutral-400 disabled:opacity-30"
+                >
+                  ‹
+                </button>
+                <span className="text-xs text-neutral-400">
+                  {activeSlide + 1} / {slides.length}
+                </span>
+                <button
+                  onClick={() => setActiveSlide((i) => Math.min(slides.length - 1, i + 1))}
+                  disabled={activeSlide === slides.length - 1}
+                  className="flex h-7 w-7 items-center justify-center rounded-md border border-neutral-200 bg-white text-neutral-500 hover:border-neutral-400 disabled:opacity-30"
+                >
+                  ›
+                </button>
+              </div>
+            </div>
+          ) : error ? (
+            <div className="max-w-md rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+              <p className="font-medium">Generation failed</p>
+              <p className="mt-1 text-xs">{error}</p>
+            </div>
+          ) : cancelled ? (
+            <div className="max-w-md rounded-md border border-neutral-200 bg-white p-4 text-sm text-neutral-600">
+              <p className="font-medium">Generation cancelled</p>
+              <p className="mt-1 text-xs">You stopped this before it finished.</p>
+            </div>
+          ) : isBusy ? (
+            <div className="flex flex-col items-center gap-6">
+              <Loader label={stepLabel(step)} />
+              <button
+                onClick={handleCancel}
+                className="rounded-md border border-neutral-300 bg-white px-4 py-1.5 text-xs font-medium text-neutral-600 hover:border-neutral-400 hover:text-neutral-900"
+              >
+                Stop generating
+              </button>
+            </div>
+          ) : (
+            <div className="text-center text-neutral-400">
+              <span className="text-sm">No presentation yet — describe one on the right.</span>
+            </div>
+          )}
+        </main>
+
+        <aside className="flex flex-col overflow-y-auto border-l border-neutral-200 bg-white p-4">
+          <h2 className="mb-4 text-sm font-medium text-neutral-500">AI Assistant</h2>
+
+          <div className="flex-1 space-y-3 overflow-y-auto">
+            {messages.map((m) => (
+              <div
+                key={m.id}
+                className={`rounded-lg px-3 py-2 text-sm leading-relaxed ${
+                  m.role === "user" ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800"
+                }`}
+              >
+                {m.content}
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-3 flex flex-col gap-3">
+            {!presentationId && (
+              <div className="flex flex-wrap gap-2">
+                {PRESET_PROMPTS.map((p) => (
+                  <button
+                    key={p.label}
+                    onClick={() => handleSubmit(p.prompt)}
+                    disabled={isBusy}
+                    className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-600 hover:border-neutral-400 disabled:opacity-50"
+                  >
+                    {p.label}
+                  </button>
+                ))}
               </div>
             )}
-            <div className="shadow-lg">
-              {isBusy && !active.content.html ? (
-                <SlideSkeleton />
-              ) : (
-                <SlideRenderer content={active.content} theme={theme} />
+
+            <div className="rounded-md border border-neutral-200">
+              <button
+                onClick={() => setSettingsOpen((o) => !o)}
+                className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-neutral-600"
+              >
+                <span>
+                  Settings
+                  {!settingsOpen && providers && (
+                    <span className="ml-2 font-normal text-neutral-400">
+                      {providers.llm.find((p) => p.name === llmProvider)?.label ?? llmProvider}
+                    </span>
+                  )}
+                </span>
+                <span className="text-neutral-400">{settingsOpen ? "−" : "+"}</span>
+              </button>
+              {settingsOpen && (
+                <div className="flex flex-col gap-2 border-t border-neutral-100 p-3">
+                  <div className="flex gap-2">
+                    <select
+                      value={llmProvider}
+                      onChange={(e) => handleLlmProviderChange(e.target.value)}
+                      disabled={!!presentationId}
+                      className="flex-1 rounded-md border border-neutral-200 bg-white p-2 text-xs disabled:opacity-50"
+                    >
+                      {providers?.llm.map((p) => (
+                        <option key={p.name} value={p.name} disabled={!p.configured}>
+                          {p.label}
+                          {!p.configured ? " (no key)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={llmModel}
+                      onChange={(e) => setLlmModel(e.target.value)}
+                      disabled={!!presentationId}
+                      className="flex-1 rounded-md border border-neutral-200 bg-white p-2 text-xs disabled:opacity-50"
+                    >
+                      {(providers?.llm.find((p) => p.name === llmProvider)?.models ?? []).map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.id}
+                          {!m.ready ? " (downloads on first use)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <select
+                    value={imageProvider}
+                    onChange={(e) => setImageProvider(e.target.value)}
+                    disabled={!!presentationId}
+                    className="rounded-md border border-neutral-200 bg-white p-2 text-xs disabled:opacity-50"
+                  >
+                    {providers?.image.map((p) => (
+                      <option key={p.name} value={p.name} disabled={!p.configured}>
+                        {p.label} (images){!p.configured ? " (no key)" : ""}
+                      </option>
+                    ))}
+                  </select>
+
+                  <label className="flex items-start gap-2 rounded-md border border-neutral-200 p-2.5 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={qaEnabled}
+                      onChange={(e) => setQaEnabled(e.target.checked)}
+                      disabled={!!presentationId}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      <span className="font-medium text-neutral-700">Run visual QA</span>
+                      <span className="block text-neutral-400">
+                        Screenshots each slide and asks a vision model to check for overflow,
+                        overlap, or tiny text. Slower, especially with a local model.
+                      </span>
+                    </span>
+                  </label>
+
+                  <label className="flex items-start gap-2 rounded-md border border-neutral-200 p-2.5 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={guidedMode}
+                      onChange={(e) => setGuidedMode(e.target.checked)}
+                      disabled={!!presentationId}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      <span className="font-medium text-neutral-700">Ask me clarifying questions</span>
+                      <span className="block text-neutral-400">
+                        Confirms audience/goal if unclear, and lets you pick the design direction
+                        before slides are generated.
+                      </span>
+                    </span>
+                  </label>
+                </div>
               )}
             </div>
-          </div>
-        ) : error ? (
-          <div className="max-w-md rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-            <p className="font-medium">Generation failed</p>
-            <p className="mt-1 text-xs">{error}</p>
-          </div>
-        ) : cancelled ? (
-          <div className="max-w-md rounded-md border border-neutral-200 bg-neutral-100 p-4 text-sm text-neutral-600">
-            <p className="font-medium">Generation cancelled</p>
-            <p className="mt-1 text-xs">You stopped this before it finished.</p>
-          </div>
-        ) : isBusy ? (
-          <div className="flex flex-col items-center gap-6">
-            <Loader label={stepLabel(step)} />
-            <button
-              onClick={handleCancel}
-              className="rounded-md border border-neutral-300 px-4 py-1.5 text-xs font-medium text-neutral-600 hover:border-neutral-400 hover:text-neutral-900"
-            >
-              Stop generating
-            </button>
-          </div>
-        ) : (
-          <div className="text-center text-neutral-400">
-            <span className="text-sm">No presentation yet — describe one on the right.</span>
-          </div>
-        )}
-      </main>
 
-      <aside className="flex flex-col border-l border-neutral-200 p-4">
-        <h2 className="mb-4 text-sm font-medium text-neutral-500">AI Assistant</h2>
-
-        <div className="flex-1 space-y-3 overflow-y-auto">
-          {messages.map((m) => (
-            <div
-              key={m.id}
-              className={`rounded-md px-3 py-2 text-sm ${
-                m.role === "user" ? "bg-neutral-900 text-white" : "bg-neutral-100"
-              }`}
-            >
-              {m.content}
-            </div>
-          ))}
-        </div>
-
-        <div className="mt-3 flex flex-col gap-3">
-          {!presentationId && (
-            <div className="flex flex-wrap gap-2">
-              {PRESET_PROMPTS.map((p) => (
-                <button
-                  key={p.label}
-                  onClick={() => handleSubmit(p.prompt)}
-                  disabled={isBusy}
-                  className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-600 hover:border-neutral-400 disabled:opacity-50"
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          )}
-
-          <div className="flex gap-2">
-            <select
-              value={llmProvider}
-              onChange={(e) => handleLlmProviderChange(e.target.value)}
-              disabled={!!presentationId}
-              className="flex-1 rounded-md border border-neutral-200 bg-white p-2 text-xs disabled:opacity-50"
-            >
-              {providers?.llm.map((p) => (
-                <option key={p.name} value={p.name} disabled={!p.configured}>
-                  {p.label}
-                  {!p.configured ? " (no key)" : ""}
-                </option>
-              ))}
-            </select>
-            <select
-              value={llmModel}
-              onChange={(e) => setLlmModel(e.target.value)}
-              disabled={!!presentationId}
-              className="flex-1 rounded-md border border-neutral-200 bg-white p-2 text-xs disabled:opacity-50"
-            >
-              {(providers?.llm.find((p) => p.name === llmProvider)?.models ?? []).map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.id}
-                  {!m.ready ? " (downloads on first use)" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-          <select
-            value={imageProvider}
-            onChange={(e) => setImageProvider(e.target.value)}
-            disabled={!!presentationId}
-            className="rounded-md border border-neutral-200 bg-white p-2 text-xs disabled:opacity-50"
-          >
-            {providers?.image.map((p) => (
-              <option key={p.name} value={p.name} disabled={!p.configured}>
-                {p.label} (images){!p.configured ? " (no key)" : ""}
-              </option>
-            ))}
-          </select>
-
-          <label className="flex items-start gap-2 rounded-md border border-neutral-200 bg-white p-2.5 text-xs">
-            <input
-              type="checkbox"
-              checked={qaEnabled}
-              onChange={(e) => setQaEnabled(e.target.checked)}
-              disabled={!!presentationId}
-              className="mt-0.5"
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder={
+                presentationId
+                  ? "Make this more premium…"
+                  : "Create a 12-slide pitch deck for an AI healthcare startup targeting investors..."
+              }
+              className="h-24 resize-none rounded-md border border-neutral-200 p-3 text-sm outline-none focus:border-neutral-400"
             />
-            <span>
-              <span className="font-medium text-neutral-700">Run visual QA</span>
-              <span className="block text-neutral-400">
-                Screenshots each slide and asks a vision model to check for overflow,
-                overlap, or tiny text. More thorough, but adds one extra model call per
-                slide — noticeably slower, especially with a local model.
-              </span>
-            </span>
-          </label>
-
-          <label className="flex items-start gap-2 rounded-md border border-neutral-200 bg-white p-2.5 text-xs">
-            <input
-              type="checkbox"
-              checked={guidedMode}
-              onChange={(e) => setGuidedMode(e.target.checked)}
-              disabled={!!presentationId}
-              className="mt-0.5"
-            />
-            <span>
-              <span className="font-medium text-neutral-700">Ask me clarifying questions</span>
-              <span className="block text-neutral-400">
-                Confirms audience/goal if the prompt leaves them unclear, and lets you pick
-                the design direction before slides are generated — otherwise both are
-                decided automatically.
-              </span>
-            </span>
-          </label>
-
-          <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder={
-              presentationId
-                ? "Make this more premium…"
-                : "Create a 12-slide pitch deck for an AI healthcare startup targeting investors..."
-            }
-            className="h-24 resize-none rounded-md border border-neutral-200 p-3 text-sm outline-none focus:border-neutral-400"
-          />
-          {isBusy ? (
-            <button
-              onClick={handleCancel}
-              className="rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-700 hover:border-neutral-400"
-            >
-              Stop generating
-            </button>
-          ) : (
-            <button
-              onClick={() => handleSubmit()}
-              disabled={!!pendingQuestions}
-              className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-            >
-              {pendingQuestions ? "Answer the question above…" : presentationId ? "Send" : "Generate presentation"}
-            </button>
-          )}
-        </div>
-      </aside>
+            {isBusy ? (
+              <button
+                onClick={handleCancel}
+                className="rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-700 hover:border-neutral-400"
+              >
+                Stop generating
+              </button>
+            ) : (
+              <button
+                onClick={() => handleSubmit()}
+                disabled={!!pendingQuestions}
+                className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {pendingQuestions ? "Answer the question above…" : presentationId ? "Send" : "Generate presentation"}
+              </button>
+            )}
+          </div>
+        </aside>
+      </div>
     </div>
   );
 }

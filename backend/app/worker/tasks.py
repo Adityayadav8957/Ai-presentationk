@@ -4,9 +4,12 @@ from datetime import UTC, datetime
 from sqlmodel import Session, select
 
 from app.agents.design_agent import design_theme_question
+from app.agents.html_agent import HTMLAgent
+from app.agents.image_agent import ImageAgent
 from app.agents.orchestrator import Orchestrator
 from app.agents.qa_agent import QAAgent
 from app.agents.revision_agent import RevisionAgent
+from app.agents.slide_planner import SlidePlannerAgent
 from app.db.session import engine
 from app.models.job import Job
 from app.models.message import Message
@@ -163,6 +166,41 @@ def generate_presentation(self, presentation_id: str) -> str:
             raise
 
     return presentation_id
+
+
+@celery_app.task(bind=True, name="render_new_slide")
+def render_new_slide(self, presentation_id: str, slide_id: str, description: str) -> str:
+    """Renders one manually-added slide: plans its semantic content from the
+    user's short description (grounded in the deck's brief), then runs it
+    through the same image+HTML pipeline as any other slide. Failures are
+    logged, not raised — the slide just keeps its placeholder content
+    rather than breaking the whole deck."""
+    logger.info("render_new_slide: presentation=%s slide=%s", presentation_id, slide_id)
+    with Session(engine) as session:
+        presentation = session.get(Presentation, presentation_id)
+        slide = session.get(Slide, slide_id)
+        if presentation is None or slide is None:
+            logger.warning("render_new_slide: presentation or slide not found, aborting")
+            return slide_id
+
+        try:
+            llm = get_llm_provider(presentation.llm_provider, presentation.llm_model)
+
+            planned = SlidePlannerAgent(llm).run(presentation.brief, description, 1)
+            content = planned[0] if planned else slide.content
+
+            image_agent = ImageAgent(get_image_provider(presentation.image_provider))
+            content = image_agent.run_one(content, presentation_id, slide.position)
+            content = HTMLAgent(llm).render_one(slide.position, content, presentation.theme or {}, presentation.brief)
+
+            slide.content = content
+            session.add(slide)
+            session.commit()
+            logger.info("render_new_slide: done presentation=%s slide=%s", presentation_id, slide_id)
+        except Exception:
+            logger.exception("render_new_slide: failed presentation=%s slide=%s", presentation_id, slide_id)
+
+    return slide_id
 
 
 @celery_app.task(bind=True, name="refine_presentation")

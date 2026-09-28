@@ -94,6 +94,24 @@ export async function retryPresentation(presentationId: string) {
   return (await response.json()) as CreatePresentationResponse;
 }
 
+export async function addSlide(presentationId: string, description: string, position?: number) {
+  const response = await fetch(`${API_URL}/presentations/${presentationId}/slides`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ description, position }),
+  });
+  if (!response.ok) throw new Error("Failed to add slide");
+  return (await response.json()) as { slide_id: string };
+}
+
+export async function deleteSlide(presentationId: string, slideId: string) {
+  const response = await fetch(`${API_URL}/presentations/${presentationId}/slides/${slideId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) throw new Error("Failed to delete slide");
+  return (await response.json()) as { status: string };
+}
+
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
