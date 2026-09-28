@@ -158,8 +158,14 @@ Implementation notes, confirmed by direct testing against this repo:
 - **HTML output quality with Claude Code is genuinely strong** — inspected
   directly: real per-slide SVG charts built from actual comparative data,
   deliberately mixed card treatments (a dark hero stat card next to a
-  plain bordered one, never a uniform grid), grounded specific copy. If
-  you saw weak output earlier, it was very likely from before the `--bare`
+  plain bordered one, never a uniform grid), grounded specific copy, and —
+  after adding explicit background/hover guidance — subtle CSS-only
+  decorative gradients (the model has invented its own `::before`
+  pseudo-element gradients, going beyond the technique example) plus real
+  `:hover`/`transition` states on card elements. All CSS, no JavaScript —
+  the render iframe's `sandbox=""` blocks all script execution by design,
+  so "interactive" here means hover/transition polish, not click handlers.
+  If you saw weak output earlier, it was very likely from before the `--bare`
   fix above — every failed generation call falls back to the plain
   component layout, which looks exactly like "bad HTML" but is really "no
   HTML at all" because the auth was rejected.

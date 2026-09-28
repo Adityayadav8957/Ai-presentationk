@@ -44,6 +44,21 @@ Technical rules:
 - Do not rotate or transform text elements (no `transform: rotate(...)`
   on headings, stats, or body text) — keep all text horizontal and legible.
 
+Backgrounds and polish (CSS only — no JavaScript is ever executed, so
+`<script>`, inline event handlers like `onclick`, and anchor/button
+elements that imply an action are all pointless and forbidden; but CSS
+`:hover`/`transition`/`animation` work fine and DO render when a person
+views the slide, even though a static screenshot won't capture them):
+- Avoid a flat single-color background as the default. Use a subtle
+  gradient (linear or radial), a soft decorative shape (a blurred circle
+  or accent blob positioned off to one side), or a faint background
+  pattern — but only ONE such move per slide, matching the theme's colors,
+  never competing with the content for attention.
+- Give any card-like element (a stat block, an image container, a callout)
+  a CSS `:hover` state — a small `transform: translateY(-2px)` or
+  `scale(1.01)` plus a `transition` and a slightly deeper `box-shadow`.
+  This is free polish for anyone actually viewing the deck in a browser.
+
 The technique example below is inspiration for COMPOSITION ONLY. Copying
 its actual sentences, numbers, or exact color choices is a failure — you
 must write entirely new text and values for this slide's real content.

@@ -37,6 +37,12 @@ actual content, not reflexive defaults.
   one a genuinely different treatment (e.g. one dark/filled "hero" card
   with a large number, one with just a colored left border, one plain) —
   never the same card style repeated.
+- Avoid a flat single-color background by default — a subtle gradient or
+  one soft decorative shape (a blurred accent circle off to one side) adds
+  depth without competing with the content. Give card-like elements a CSS
+  `:hover` state (a small lift + deeper shadow, via `transform` and
+  `transition`) — free polish for anyone viewing the deck live, even
+  though it won't show in a static screenshot.
 """
 
 AVOID_LIST = """
@@ -130,6 +136,33 @@ EXAMPLES = [
         <h3 style="font-size:12px;font-weight:700;color:#5b6680;margin:0 0 6px 0;">Biggest unknown</h3>
         <p style="font-size:14px;margin:0;">What the scoring algorithm expects as input.</p>
       </div>
+    </div>
+  </div>
+</div>""",
+    },
+    {
+        "name": "gradient_hover_stats",
+        "best_for": ("data_story", "hero", "grid"),
+        "html": """<div style="width:100%;height:100%;background:linear-gradient(135deg, #0b1220 0%, #10192e 60%, #0b1220 100%);color:#ffffff;font-family:Inter,sans-serif;padding:6% 7%;display:flex;flex-direction:column;position:relative;overflow:hidden;">
+  <div style="position:absolute;top:-20%;right:-10%;width:50%;aspect-ratio:1;border-radius:50%;background:radial-gradient(circle, rgba(37,99,235,0.25) 0%, rgba(37,99,235,0) 70%);"></div>
+  <style>
+    .retention-card { transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease; }
+    .retention-card:hover { transform: translateY(-4px); box-shadow: 0 12px 24px -8px rgba(0,0,0,0.4); border-color: rgba(255,255,255,0.25); }
+  </style>
+  <h1 style="position:relative;font-size:30px;font-weight:800;letter-spacing:-0.02em;margin:0 0 6px 0;max-width:70%;">Retention holds steady while the base triples</h1>
+  <p style="position:relative;font-size:14px;color:#94a3b8;margin:0 0 32px 0;">Cohort data, trailing 12 months</p>
+  <div style="position:relative;display:grid;grid-template-columns:repeat(3,1fr);gap:20px;">
+    <div class="retention-card" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:20px;">
+      <div style="font-size:34px;font-weight:800;color:#60a5fa;">94%</div>
+      <div style="font-size:13px;color:#94a3b8;margin-top:4px;">12-month retention</div>
+    </div>
+    <div class="retention-card" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:20px;">
+      <div style="font-size:34px;font-weight:800;color:#60a5fa;">3.1x</div>
+      <div style="font-size:13px;color:#94a3b8;margin-top:4px;">User base growth</div>
+    </div>
+    <div class="retention-card" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:20px;">
+      <div style="font-size:34px;font-weight:800;color:#60a5fa;">$0</div>
+      <div style="font-size:13px;color:#94a3b8;margin-top:4px;">Extra spend on retention</div>
     </div>
   </div>
 </div>""",
