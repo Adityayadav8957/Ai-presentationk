@@ -14,6 +14,15 @@ ProgressCallback = Callable[[str], None]
 
 
 def _extract_slide_count(brief: dict, default: int = 8) -> int:
+    # Check the guided-mode "length" clarification answer first (e.g.
+    # "Short (5-7 slides)") — it's a deliberate user choice, more
+    # trustworthy than guessing from the raw topic text.
+    clarified_length = str(brief.get("clarifications", {}).get("length", ""))
+    match = re.search(r"(\d+)\+?\s*[-\s]?(?:to\s*)?(\d+)?\+?\s*slide", clarified_length, re.IGNORECASE)
+    if match:
+        numbers = [int(n) for n in match.groups() if n]
+        return max(3, min(round(sum(numbers) / len(numbers)), 20))
+
     text = str(brief.get("topic", ""))
     match = re.search(r"(\d+)\s*[-\s]?slide", text, re.IGNORECASE)
     if match:

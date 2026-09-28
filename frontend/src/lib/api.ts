@@ -1,9 +1,25 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-export type CreatePresentationResponse = {
-  presentation_id: string;
-  job_id: string;
+export type ThemeOption = {
+  id: string;
+  label: string;
+  primary: string;
+  accent: string;
+  background: string;
+  font: string;
 };
+
+export type Question = {
+  id: string;
+  text: string;
+  type?: "theme_picker";
+  suggested?: string;
+  options?: (string | ThemeOption)[];
+};
+
+export type CreatePresentationResponse =
+  | { presentation_id: string; job_id: string }
+  | { presentation_id: string; needs_input: true; questions: Question[] };
 
 export type JobStatus = {
   id: string;
@@ -20,6 +36,16 @@ export async function createPresentation(brief: Record<string, unknown>) {
   });
   if (!response.ok) throw new Error("Failed to create presentation");
   return (await response.json()) as CreatePresentationResponse;
+}
+
+export async function answerQuestions(presentationId: string, answers: Record<string, string>) {
+  const response = await fetch(`${API_URL}/presentations/${presentationId}/answer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ answers }),
+  });
+  if (!response.ok) throw new Error("Failed to submit answers");
+  return (await response.json()) as { job_id: string };
 }
 
 export async function getJobStatus(presentationId: string) {

@@ -189,6 +189,7 @@ ai_presentation/
 │   │   │   ├── design_reference.py # design principles/avoid-list + technique examples
 │   │   │   ├── qa_agent.py       # screenshot + vision critique (opt-in, off by default)
 │   │   │   ├── revision_agent.py # chat-based whole-deck edits
+│   │   │   ├── requirements_agent.py # guided-mode pre-flight clarifying questions
 │   │   │   └── json_utils.py     # robust JSON extraction from model output
 │   │   ├── worker/
 │   │   │   ├── celery_app.py   # Celery configured against Redis
@@ -252,6 +253,51 @@ ai_presentation/
 9. **Your decks** (`/decks`) lists every presentation with its status;
    **Retry** on any of them (`POST /presentations/{id}/retry`) clears its
    slides and re-runs `generate_presentation` from the same brief.
+
+## Guided mode: the AI asks clarifying questions
+
+Off by default (the whole product philosophy is "just generate it"), but
+toggle "Ask me clarifying questions" and two independent question rounds
+can interrupt generation:
+
+**Round 1 — pre-flight (LLM judgment call, before any Celery job exists).**
+`POST /presentations` runs `RequirementsAgent` synchronously, in the
+request handler itself — one quick LLM call deciding whether the raw
+prompt leaves audience/objective/length genuinely ambiguous. Most prompts
+don't need this; if it decides they don't, the response looks exactly like
+the non-guided path (`{presentation_id, job_id}`, generation already
+enqueued). If it does, no job is enqueued yet — the response is
+`{presentation_id, needs_input: true, questions: [...]}` and the
+presentation sits at `status="needs_input"` until answered.
+
+**Round 2 — post-planning design confirmation (deterministic, always
+happens in guided mode).** Once `generate_presentation` finishes planning
+(research → story → slide JSON → theme), if `guided_mode` is on, it does
+**not** proceed to rendering. It persists the planned bare slides, sets
+`Job.status = "waiting_for_input"`, and stores a `theme_picker` question
+with all 5 design systems from `design_agent.THEMES` (real hex swatches,
+not just names) as `Presentation.pending_questions`. The Celery task then
+**returns normally** — it doesn't block or poll waiting for an answer.
+
+**Answering, either round:** `POST /presentations/{id}/answer` with
+`{"answers": {...}}`. For pre-flight, the answers get merged into
+`Presentation.brief["clarifications"]` (which every planning agent already
+sees, since they all interpolate the whole brief dict into their prompts —
+no extra plumbing needed) and a fresh `generate_presentation` is enqueued.
+For post-planning, the chosen theme is written directly to
+`Presentation.theme` and a fresh task is enqueued too — but this time
+**`generate_presentation` checks for already-persisted slides at the top
+and skips planning entirely**, jumping straight into
+`render_slides_in_parallel`. Planning never runs twice.
+
+Two things worth knowing:
+- `waiting_for_input` is deliberately excluded from the staleness
+  self-heal (see Gotchas) — the task has legitimately finished and is
+  waiting on a human for however long that takes, which is not "stalled".
+- The pre-flight LLM call isn't always reliable about response shape —
+  confirmed directly that a model can return a bare JSON array instead of
+  the `{"questions": [...]}` wrapper asked for. `RequirementsAgent`
+  handles both shapes defensively rather than crashing.
 
 ## Local development
 
@@ -371,6 +417,10 @@ stack (Postgres, Redis, Celery worker, Flower, FastAPI, Next.js):
   screenshot → vision-model critique, stored per slide, gracefully skipped
   (not fatal) on any failure
 - Chat-based whole-deck revision
+- Guided mode (opt-in): pre-flight clarifying questions on ambiguous
+  prompts, plus a mandatory post-planning design-system confirmation with
+  real theme swatches — both confirmed working end to end, including
+  correctly skipping re-planning when resuming after an answer
 - Provider/model picker in the UI, backed by live model listing where the
   provider supports it — including using a user's own Claude Code
   subscription (via `claude setup-token`) instead of a separate API key

@@ -20,6 +20,18 @@ _KEYWORDS = {
 }
 
 
+def design_theme_question(suggested: str) -> dict:
+    """The post-planning guided-mode question: confirm/choose the design
+    system rather than silently locking in DesignAgent's keyword guess."""
+    return {
+        "id": "theme",
+        "text": "Pick a design direction for this deck",
+        "type": "theme_picker",
+        "suggested": suggested,
+        "options": [{"id": name, "label": name.capitalize(), **tokens} for name, tokens in THEMES.items()],
+    }
+
+
 class DesignAgent:
     """Deterministic theme selection — no LLM call needed for a small, fixed
     set of design systems."""

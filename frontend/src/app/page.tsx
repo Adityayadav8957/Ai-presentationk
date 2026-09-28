@@ -9,6 +9,9 @@ import { SlideRenderer } from "@/components/slides/SlideRenderer";
 import {
   type ChatMessage,
   type ProvidersResponse,
+  type Question,
+  type ThemeOption,
+  answerQuestions,
   cancelGeneration,
   createPresentation,
   getJobStatus,
@@ -84,6 +87,76 @@ function SlideSkeleton() {
   );
 }
 
+function QuestionPanel({
+  questions,
+  onSubmit,
+}: {
+  questions: Question[];
+  onSubmit: (answers: Record<string, string>) => void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(questions.map((q) => [q.id, q.suggested ?? ""])),
+  );
+  const canSubmit = questions.every((q) => values[q.id]);
+
+  return (
+    <div className="w-full max-w-2xl rounded-lg border border-neutral-200 bg-white p-6 shadow-sm">
+      <h2 className="mb-1 text-base font-semibold text-neutral-900">Quick question before we continue</h2>
+      <p className="mb-5 text-xs text-neutral-400">This only happens because guided mode is on.</p>
+      <div className="flex flex-col gap-6">
+        {questions.map((q) => (
+          <div key={q.id}>
+            <p className="mb-2 text-sm font-medium text-neutral-700">{q.text}</p>
+            {q.type === "theme_picker" ? (
+              <div className="grid grid-cols-5 gap-3">
+                {(q.options as ThemeOption[] | undefined)?.map((opt) => (
+                  <button
+                    key={opt.id}
+                    onClick={() => setValues((v) => ({ ...v, [q.id]: opt.id }))}
+                    className={`rounded-lg border-2 p-2 text-left transition ${
+                      values[q.id] === opt.id ? "border-neutral-900" : "border-neutral-200 hover:border-neutral-400"
+                    }`}
+                  >
+                    <div className="mb-2 flex h-10 overflow-hidden rounded">
+                      <div className="flex-1" style={{ background: opt.background }} />
+                      <div className="flex-1" style={{ background: opt.primary }} />
+                      <div className="flex-1" style={{ background: opt.accent }} />
+                    </div>
+                    <span className="text-[11px] font-medium text-neutral-700">{opt.label}</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {(q.options as string[] | undefined)?.map((opt) => (
+                  <button
+                    key={opt}
+                    onClick={() => setValues((v) => ({ ...v, [q.id]: opt }))}
+                    className={`rounded-full border px-3 py-1.5 text-xs ${
+                      values[q.id] === opt
+                        ? "border-neutral-900 bg-neutral-900 text-white"
+                        : "border-neutral-200 bg-white text-neutral-600 hover:border-neutral-400"
+                    }`}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      <button
+        onClick={() => onSubmit(values)}
+        disabled={!canSubmit}
+        className="mt-6 rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
+      >
+        Continue
+      </button>
+    </div>
+  );
+}
+
 const PRESET_PROMPTS = [
   {
     label: "Investor pitch deck",
@@ -122,6 +195,8 @@ function PresentationApp() {
   const [llmModel, setLlmModel] = useState("");
   const [imageProvider, setImageProvider] = useState("");
   const [qaEnabled, setQaEnabled] = useState(false);
+  const [guidedMode, setGuidedMode] = useState(false);
+  const [pendingQuestions, setPendingQuestions] = useState<Question[] | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -146,6 +221,9 @@ function PresentationApp() {
       await Promise.all([refreshPresentation(id), refreshMessages(id)]);
       const job = await getJobStatus(id);
       if (job?.status === "done") {
+        setIsBusy(false);
+      } else if (job?.status === "waiting_for_input") {
+        // pendingQuestions was already populated by refreshPresentation above.
         setIsBusy(false);
       } else if (job?.status === "cancelled") {
         setCancelled(true);
@@ -189,6 +267,7 @@ function PresentationApp() {
     const data = await getPresentation(id);
     setSlides(data.slides ?? []);
     setTheme(data.presentation?.theme);
+    setPendingQuestions(data.presentation?.pending_questions?.questions ?? null);
   }
 
   async function refreshMessages(id: string) {
@@ -212,6 +291,10 @@ function PresentationApp() {
       if (job?.status === "done") {
         if (pollRef.current) clearInterval(pollRef.current);
         onDone();
+      } else if (job?.status === "waiting_for_input") {
+        // pendingQuestions was already populated by refreshPresentation above.
+        if (pollRef.current) clearInterval(pollRef.current);
+        setIsBusy(false);
       } else if (job?.status === "cancelled") {
         if (pollRef.current) clearInterval(pollRef.current);
         onCancel();
@@ -232,7 +315,7 @@ function PresentationApp() {
 
   async function handleSubmit(presetPrompt?: string) {
     const currentPrompt = presetPrompt ?? prompt;
-    if (!currentPrompt.trim() || isBusy) return;
+    if (!currentPrompt.trim() || isBusy || pendingQuestions) return;
     setPrompt("");
     setIsBusy(true);
     setError(null);
@@ -244,15 +327,24 @@ function PresentationApp() {
     ]);
 
     if (!presentationId) {
-      const { presentation_id } = await createPresentation({
+      const resp = await createPresentation({
         topic: currentPrompt,
         llm_provider: llmProvider || undefined,
         llm_model: llmModel || undefined,
         image_provider: imageProvider || undefined,
         qa_enabled: qaEnabled,
+        guided_mode: guidedMode,
       });
+      const presentation_id = resp.presentation_id;
       setPresentationId(presentation_id);
       router.replace(`/?id=${presentation_id}`);
+
+      if ("needs_input" in resp && resp.needs_input) {
+        setPendingQuestions(resp.questions);
+        setIsBusy(false);
+        return;
+      }
+
       pollUntilDone(
         presentation_id,
         async () => {
@@ -273,6 +365,30 @@ function PresentationApp() {
     }
 
     await sendChatMessage(presentationId, currentPrompt);
+    pollUntilDone(
+      presentationId,
+      async () => {
+        await Promise.all([refreshPresentation(presentationId), refreshMessages(presentationId)]);
+        setIsBusy(false);
+      },
+      async (message) => {
+        await Promise.all([refreshPresentation(presentationId), refreshMessages(presentationId)]);
+        setError(message);
+        setIsBusy(false);
+      },
+      () => {
+        setCancelled(true);
+        setIsBusy(false);
+      },
+    );
+  }
+
+  async function handleAnswerSubmit(answers: Record<string, string>) {
+    if (!presentationId) return;
+    setPendingQuestions(null);
+    setIsBusy(true);
+    setError(null);
+    await answerQuestions(presentationId, answers);
     pollUntilDone(
       presentationId,
       async () => {
@@ -342,7 +458,9 @@ function PresentationApp() {
       </aside>
 
       <main className="flex items-center justify-center overflow-auto p-8">
-        {active ? (
+        {pendingQuestions ? (
+          <QuestionPanel questions={pendingQuestions} onSubmit={handleAnswerSubmit} />
+        ) : active ? (
           <div className="w-full max-w-4xl">
             {isBusy && (
               <div className="mb-3 flex items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
@@ -496,6 +614,24 @@ function PresentationApp() {
             </span>
           </label>
 
+          <label className="flex items-start gap-2 rounded-md border border-neutral-200 bg-white p-2.5 text-xs">
+            <input
+              type="checkbox"
+              checked={guidedMode}
+              onChange={(e) => setGuidedMode(e.target.checked)}
+              disabled={!!presentationId}
+              className="mt-0.5"
+            />
+            <span>
+              <span className="font-medium text-neutral-700">Ask me clarifying questions</span>
+              <span className="block text-neutral-400">
+                Confirms audience/goal if the prompt leaves them unclear, and lets you pick
+                the design direction before slides are generated — otherwise both are
+                decided automatically.
+              </span>
+            </span>
+          </label>
+
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
@@ -516,9 +652,10 @@ function PresentationApp() {
           ) : (
             <button
               onClick={() => handleSubmit()}
+              disabled={!!pendingQuestions}
               className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
             >
-              {presentationId ? "Send" : "Generate presentation"}
+              {pendingQuestions ? "Answer the question above…" : presentationId ? "Send" : "Generate presentation"}
             </button>
           )}
         </div>

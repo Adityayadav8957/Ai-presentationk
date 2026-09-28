@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from sqlmodel import Session, select
 
+from app.agents.design_agent import design_theme_question
 from app.agents.orchestrator import Orchestrator
 from app.agents.qa_agent import QAAgent
 from app.agents.revision_agent import RevisionAgent
@@ -78,29 +79,74 @@ def generate_presentation(self, presentation_id: str) -> str:
         try:
             _ensure_ollama_ready(presentation, on_progress)
 
-            orchestrator = Orchestrator(
-                llm_provider_name=presentation.llm_provider,
-                llm_model_name=presentation.llm_model,
-            )
-            result = orchestrator.run(presentation.brief, on_progress=on_progress)
+            existing_slides = session.exec(
+                select(Slide).where(Slide.presentation_id == presentation_id).order_by(Slide.position)
+            ).all()
 
-            presentation.story = {"outline": result["story"]}
-            presentation.theme = result["theme"]
-            presentation.status = "ready"
-            session.add(presentation)
-            session.commit()
+            llm_provider_name = presentation.llm_provider
 
-            on_progress("rendering_slides")
-            slides = _persist_bare_slides(session, presentation.id, result["slides"])
+            if existing_slides:
+                # Resuming after a guided-mode pause (e.g. design confirmation) —
+                # planning already ran and its output is already persisted.
+                logger.info(
+                    "generate_presentation: resuming presentation=%s with %d planned slides",
+                    presentation_id,
+                    len(existing_slides),
+                )
+                slides = existing_slides
+                llm = get_llm_provider(llm_provider_name, presentation.llm_model)
+            else:
+                orchestrator = Orchestrator(
+                    llm_provider_name=llm_provider_name,
+                    llm_model_name=presentation.llm_model,
+                )
+                result = orchestrator.run(presentation.brief, on_progress=on_progress)
 
-            qa_agent = QAAgent(get_vision_provider(presentation.llm_provider)) if presentation.qa_enabled else None
+                presentation.story = {"outline": result["story"]}
+                presentation.theme = result["theme"]
+
+                if presentation.guided_mode:
+                    on_progress("needs_input")
+                    presentation.status = "needs_input"
+                    presentation.pending_questions = {
+                        "stage": "post_planning",
+                        "questions": [design_theme_question(result["theme"]["name"])],
+                    }
+                    session.add(presentation)
+                    session.commit()
+
+                    # Persist the planned slides now so resuming skips planning
+                    # entirely — only the per-slide render step runs afterward.
+                    _persist_bare_slides(session, presentation.id, result["slides"])
+
+                    if job:
+                        job.status = "waiting_for_input"
+                        job.step = "needs_input"
+                        job.updated_at = datetime.now(UTC)
+                        session.add(job)
+                    session.commit()
+                    logger.info(
+                        "generate_presentation: paused for design confirmation presentation=%s",
+                        presentation_id,
+                    )
+                    return presentation_id
+
+                presentation.status = "ready"
+                session.add(presentation)
+                session.commit()
+
+                on_progress("rendering_slides")
+                slides = _persist_bare_slides(session, presentation.id, result["slides"])
+                llm = orchestrator.llm
+
+            qa_agent = QAAgent(get_vision_provider(llm_provider_name)) if presentation.qa_enabled else None
             render_slides_in_parallel(
                 presentation_id=presentation.id,
                 slides=slides,
-                theme=result["theme"],
+                theme=presentation.theme or {},
                 brief=presentation.brief,
                 image_provider=get_image_provider(presentation.image_provider),
-                llm=orchestrator.llm,
+                llm=llm,
                 qa_agent=qa_agent,
                 job_id=job.id if job else None,
             )

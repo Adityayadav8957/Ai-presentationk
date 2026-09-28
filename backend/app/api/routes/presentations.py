@@ -3,16 +3,26 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends
 from sqlmodel import Session, select
 
+from app.agents.design_agent import THEMES
+from app.agents.requirements_agent import RequirementsAgent
 from app.db.session import get_session
 from app.models.job import Job
 from app.models.presentation import Presentation
 from app.models.slide import Slide
+from app.providers.llm.registry import get_llm_provider
 from app.worker.celery_app import celery_app
 from app.worker.tasks import generate_presentation
 
 router = APIRouter(prefix="/presentations", tags=["presentations"])
 
 TERMINAL_JOB_STATUSES = ("done", "failed", "cancelled")
+
+# waiting_for_input isn't a traditional terminal state (the job can still be
+# resumed once answered), but it's also not something the staleness check
+# should ever fail — the task has already finished and is deliberately
+# waiting on a human, for however long that takes. It stays cancellable
+# though, so it's kept separate from TERMINAL_JOB_STATUSES above.
+STALENESS_EXEMPT_STATUSES = (*TERMINAL_JOB_STATUSES, "waiting_for_input")
 
 # A single LLM call (e.g. planning 10 slides on a slow local CPU model) can
 # legitimately take longer than this — so once we're past it, we don't just
@@ -48,6 +58,7 @@ def create_presentation(payload: dict, session: Session = Depends(get_session)):
     llm_model = payload.pop("llm_model", None)
     image_provider = payload.pop("image_provider", None)
     qa_enabled = bool(payload.pop("qa_enabled", False))
+    guided_mode = bool(payload.pop("guided_mode", False))
 
     presentation = Presentation(
         title=payload.get("topic", "Untitled"),
@@ -56,10 +67,21 @@ def create_presentation(payload: dict, session: Session = Depends(get_session)):
         llm_model=llm_model,
         image_provider=image_provider,
         qa_enabled=qa_enabled,
+        guided_mode=guided_mode,
     )
     session.add(presentation)
     session.commit()
     session.refresh(presentation)
+
+    if guided_mode:
+        llm = get_llm_provider(llm_provider, llm_model)
+        questions = RequirementsAgent(llm).run(presentation.brief)
+        if questions:
+            presentation.status = "needs_input"
+            presentation.pending_questions = {"stage": "pre_flight", "questions": questions}
+            session.add(presentation)
+            session.commit()
+            return {"presentation_id": presentation.id, "needs_input": True, "questions": questions}
 
     task = generate_presentation.delay(presentation.id)
 
@@ -68,6 +90,43 @@ def create_presentation(payload: dict, session: Session = Depends(get_session)):
     session.commit()
 
     return {"presentation_id": presentation.id, "job_id": job.id}
+
+
+@router.post("/{presentation_id}/answer")
+def answer_questions(presentation_id: str, payload: dict, session: Session = Depends(get_session)):
+    presentation = session.get(Presentation, presentation_id)
+    if presentation is None:
+        return {"error": "presentation not found"}
+    if not presentation.pending_questions:
+        return {"error": "no pending questions for this presentation"}
+
+    stage = presentation.pending_questions.get("stage")
+    answers = payload.get("answers", {})
+
+    if stage == "pre_flight":
+        presentation.brief = {**presentation.brief, "clarifications": answers}
+        presentation.status = "draft"
+    elif stage == "post_planning":
+        chosen = answers.get("theme")
+        if chosen in THEMES:
+            presentation.theme = {"name": chosen, **THEMES[chosen]}
+        presentation.status = "ready"
+    else:
+        return {"error": f"unknown clarification stage: {stage}"}
+
+    presentation.pending_questions = None
+    session.add(presentation)
+    session.commit()
+
+    # For post_planning, generate_presentation sees the already-persisted
+    # bare slides and resumes straight into per-slide rendering instead of
+    # re-running research/story/planning from scratch.
+    task = generate_presentation.delay(presentation.id)
+    job = Job(presentation_id=presentation.id, celery_task_id=task.id)
+    session.add(job)
+    session.commit()
+
+    return {"job_id": job.id}
 
 
 @router.get("")
@@ -92,7 +151,7 @@ def get_status(presentation_id: str, session: Session = Depends(get_session)):
         .order_by(Job.created_at.desc())
     ).first()
 
-    if job and job.status not in TERMINAL_JOB_STATUSES:
+    if job and job.status not in STALENESS_EXEMPT_STATUSES:
         age = datetime.now(UTC) - _as_utc(job.updated_at)
         should_fail = False
         reason = None
@@ -149,6 +208,7 @@ def cancel_presentation(presentation_id: str, session: Session = Depends(get_ses
     presentation = session.get(Presentation, presentation_id)
     if presentation:
         presentation.status = "cancelled"
+        presentation.pending_questions = None
         session.add(presentation)
 
     session.commit()
@@ -164,6 +224,7 @@ def retry_presentation(presentation_id: str, session: Session = Depends(get_sess
     for slide in session.exec(select(Slide).where(Slide.presentation_id == presentation_id)).all():
         session.delete(slide)
     presentation.status = "draft"
+    presentation.pending_questions = None
     session.add(presentation)
     session.commit()
 
