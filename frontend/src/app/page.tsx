@@ -60,6 +60,30 @@ function Loader({ label }: { label: string }) {
   );
 }
 
+function SlideSkeleton() {
+  return (
+    <div className="flex aspect-video w-full flex-col gap-4 rounded-md bg-white p-10">
+      <div className="h-8 w-2/3 animate-shimmer rounded-md" />
+      <div className="h-4 w-1/3 animate-shimmer rounded-md" />
+      <div className="mt-4 grid flex-1 grid-cols-3 gap-6">
+        <div className="col-span-2 flex flex-col gap-3">
+          <div className="h-4 w-full animate-shimmer rounded" />
+          <div className="h-4 w-5/6 animate-shimmer rounded" />
+          <div className="mt-2 h-full w-full animate-shimmer rounded-lg" />
+        </div>
+        <div className="flex flex-col gap-3">
+          <div className="h-20 w-full animate-shimmer rounded-lg" />
+          <div className="h-20 w-full animate-shimmer rounded-lg" />
+        </div>
+      </div>
+      <div className="flex items-center justify-center gap-2 pt-2 text-xs text-neutral-400">
+        <span className="h-2 w-2 animate-pulse rounded-full bg-blue-400" />
+        Designing this slide…
+      </div>
+    </div>
+  );
+}
+
 const PRESET_PROMPTS = [
   {
     label: "Investor pitch deck",
@@ -299,7 +323,10 @@ function PresentationApp() {
                 >
                   {String(i + 1).padStart(2, "0")}
                   {rendering && (
-                    <span className="absolute right-2 top-2 h-2 w-2 animate-pulse rounded-full bg-blue-400" />
+                    <>
+                      <span className="absolute right-2 top-2 h-2 w-2 animate-pulse rounded-full bg-blue-400" />
+                      <span className="absolute inset-x-2 bottom-1 h-0.5 animate-shimmer rounded-full" />
+                    </>
                   )}
                   {slide.qa_report?.issues && slide.qa_report.issues.length > 0 && (
                     <span
@@ -318,8 +345,23 @@ function PresentationApp() {
         {active ? (
           <div className="w-full max-w-4xl">
             {isBusy && (
-              <div className="mb-3 rounded-md border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800">
-                Generating slides — {slides.filter((s) => s.content.html).length} of {slides.length} ready
+              <div className="mb-3 flex items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                <span className="h-2 w-2 flex-none animate-pulse rounded-full bg-blue-500" />
+                <span className="flex-1">
+                  {stepLabel(step)} — {slides.filter((s) => s.content.html).length} of {slides.length} slides ready
+                </span>
+                <div className="h-1.5 w-20 flex-none overflow-hidden rounded-full bg-blue-200">
+                  <div
+                    className="h-full rounded-full bg-blue-500 transition-all duration-500"
+                    style={{
+                      width: `${
+                        slides.length
+                          ? (slides.filter((s) => s.content.html).length / slides.length) * 100
+                          : 0
+                      }%`,
+                    }}
+                  />
+                </div>
               </div>
             )}
             {error && (
@@ -329,7 +371,11 @@ function PresentationApp() {
               </div>
             )}
             <div className="shadow-lg">
-              <SlideRenderer content={active.content} theme={theme} />
+              {isBusy && !active.content.html ? (
+                <SlideSkeleton />
+              ) : (
+                <SlideRenderer content={active.content} theme={theme} />
+              )}
             </div>
           </div>
         ) : error ? (

@@ -155,6 +155,14 @@ Implementation notes, confirmed by direct testing against this repo:
 - **Text-only.** Claude Code's headless mode doesn't document image/vision
   input, so this provider isn't used for the vision QA step — sending it a
   multimodal message raises immediately rather than silently mishandling it.
+- **HTML output quality with Claude Code is genuinely strong** — inspected
+  directly: real per-slide SVG charts built from actual comparative data,
+  deliberately mixed card treatments (a dark hero stat card next to a
+  plain bordered one, never a uniform grid), grounded specific copy. If
+  you saw weak output earlier, it was very likely from before the `--bare`
+  fix above — every failed generation call falls back to the plain
+  component layout, which looks exactly like "bad HTML" but is really "no
+  HTML at all" because the auth was rejected.
 
 ## Repository structure
 
@@ -345,9 +353,15 @@ stack (Postgres, Redis, Celery worker, Flower, FastAPI, Next.js):
 - Progressive, checkpointed, parallel per-slide rendering: image
   generation → HTML generation → (if enabled) QA all happen per slide, on
   their own thread, committed to Postgres the moment that slide finishes —
-  not held in memory until the whole deck completes. The frontend polls
-  the presentation while a job runs and slides appear on screen one at a
-  time as they're ready, with a live "N of M ready" indicator
+  not held in memory until the whole deck completes. Confirmed directly:
+  polling the API mid-generation shows the slide count appear as soon as
+  planning finishes, then each slide's `html` field fill in independently
+  over time, well before the job reaches `done`.
+- Skeleton loading UI: as soon as the slide count is known, that many
+  placeholder cards appear immediately (in the sidebar and main canvas)
+  with a shimmer animation, each one swapping to its real rendered content
+  the moment that slide's HTML actually lands — plus a live progress bar
+  ("N of M slides ready") instead of one big spinner for the whole job
 - Per-slide HTML generation: each slide gets a real, styled HTML fragment
   from an LLM call, rendered in a sandboxed iframe, with the generic
   component layout as a fallback if it fails
