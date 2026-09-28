@@ -11,6 +11,9 @@ _FALLBACK_MODELS = {
         "THUDM/glm-4-9b-chat",
     ],
     "anthropic": ["claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5-20251001"],
+    # Empty on purpose — no forced model, Claude Code uses whatever model
+    # is configured for the user's own subscription/session.
+    "claude_code": [],
 }
 
 _SUGGESTED_OLLAMA_MODELS = ["llama3.2:3b", "llama3.1:8b", "qwen2.5:7b", "mistral:7b", "llava:7b"]

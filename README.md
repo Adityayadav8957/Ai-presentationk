@@ -105,6 +105,7 @@ backend/app/providers/llm/
   base.py                 → LLMProvider interface (chat / stream)
   openai_compatible.py     → OpenAI, SiliconFlow, Ollama, DeepSeek, Together...
   anthropic_provider.py    → Claude
+  claude_code_provider.py  → uses a user's own Claude Code subscription (see below)
   registry.py              → get_llm_provider(name, model) picks the active one
   catalog.py               → GET /providers model listing (live models.list()
                              where available, curated fallback otherwise)
@@ -127,6 +128,33 @@ shows a small curated list of common models; ones not yet present locally
 are marked "(downloads on first use)". Selecting one and generating
 triggers `ensure_model_pulled()` in the Celery task before the pipeline
 runs, reported as a `pulling_model` progress step.
+
+**Claude Code as a provider.** If you already pay for a Claude subscription
+and have Claude Code set up, you can generate through that instead of a
+separate `ANTHROPIC_API_KEY`:
+
+1. On your own machine, run `claude setup-token` (one time) — this issues a
+   long-lived OAuth token tied to your subscription.
+2. Put it in `backend/.env` as `CLAUDE_CODE_OAUTH_TOKEN=...`.
+3. Pick "Claude Code (your subscription)" in the provider picker.
+
+Implementation notes, confirmed by direct testing against this repo:
+- The backend/worker Docker image installs Node.js + `@anthropic-ai/claude-code`
+  so the `claude` binary is available inside the container.
+- `ClaudeCodeProvider` shells out to `claude -p "<prompt>" --output-format json`
+  and parses the `result` field from the JSON response.
+- **Deliberately not `--bare` mode.** Bare mode (the mode Anthropic's own
+  docs recommend for scripted/CI use) only accepts a plain
+  `ANTHROPIC_API_KEY` — with only `CLAUDE_CODE_OAUTH_TOKEN` set, bare mode
+  replies `"Not logged in · Please run /login"` even though the token is
+  valid. Plain (non-bare) `-p` mode does honor the OAuth token correctly.
+- Concurrent invocations (tested with 3 simultaneous calls via a thread
+  pool, matching how the per-slide pipeline actually runs) each returned
+  correct, independent results — no observed session locking issues, even
+  though Anthropic's docs don't explicitly document this as safe.
+- **Text-only.** Claude Code's headless mode doesn't document image/vision
+  input, so this provider isn't used for the vision QA step — sending it a
+  multimodal message raises immediately rather than silently mishandling it.
 
 ## Repository structure
 
@@ -330,7 +358,8 @@ stack (Postgres, Redis, Celery worker, Flower, FastAPI, Next.js):
   (not fatal) on any failure
 - Chat-based whole-deck revision
 - Provider/model picker in the UI, backed by live model listing where the
-  provider supports it
+  provider supports it — including using a user's own Claude Code
+  subscription (via `claude setup-token`) instead of a separate API key
 - Real cancellation — "Stop generating" actually terminates the worker
   process running the task (`celery_app.control.revoke(..., terminate=True)`),
   not just the frontend's poll loop

@@ -10,6 +10,7 @@ _LLM_LABELS = {
     "openai": "OpenAI",
     "anthropic": "Anthropic",
     "ollama": "Ollama (offline / local)",
+    "claude_code": "Claude Code (your subscription)",
 }
 
 
@@ -22,6 +23,7 @@ def list_providers():
         "openai": bool(settings.openai_api_key),
         "anthropic": bool(settings.anthropic_api_key),
         "ollama": True,
+        "claude_code": bool(settings.claude_code_oauth_token),
     }
 
     llm = [

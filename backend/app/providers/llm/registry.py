@@ -1,6 +1,7 @@
 from app.core.config import get_settings
 from app.providers.llm.anthropic_provider import AnthropicProvider
 from app.providers.llm.base import LLMProvider
+from app.providers.llm.claude_code_provider import ClaudeCodeProvider
 from app.providers.llm.openai_compatible import OpenAICompatibleProvider
 
 _DEFAULT_MODELS = {
@@ -43,6 +44,11 @@ def get_llm_provider(name: str | None = None, model: str | None = None) -> LLMPr
         )
     if provider_name == "anthropic":
         return AnthropicProvider(api_key=settings.anthropic_api_key or "", model=resolved_model)
+    if provider_name == "claude_code":
+        return ClaudeCodeProvider(
+            oauth_token=settings.claude_code_oauth_token or "",
+            model=model,  # no forced default — let Claude Code use its own configured model
+        )
 
     raise ValueError(f"Unknown LLM provider: {provider_name}")
 

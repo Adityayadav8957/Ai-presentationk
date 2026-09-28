@@ -17,6 +17,11 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str | None = None
 
+    # Generated once via `claude setup-token` on the user's own machine —
+    # draws from their existing Claude Code subscription, not separate API
+    # billing. See ClaudeCodeProvider.
+    claude_code_oauth_token: str | None = None
+
     siliconflow_api_key: str | None = None
     siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
 
